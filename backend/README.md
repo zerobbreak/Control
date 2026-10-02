@@ -5,6 +5,7 @@ The Rust runtime. It starts agents on goals and watches Claude Code and Gemini C
 - `router.rs` decides what kind of task a goal is (code, question, browse), how strong a model it needs and what the run may touch.
 - `agent.rs` holds the `Agent` trait and `ClaudeCode`, which turns a routed goal into a `claude --print` command.
 - `orchestrator.rs` starts the agent, logs its output to `~/.mission-control/runs/<id>.log` and tracks the process until it exits.
+- Approvals: agents run with Mission Control as their host on stdin and stdout (`--permission-prompt-tool stdio`). Anything the permission mode does not already allow arrives as a pending approval and waits until it is answered. Read-only runs are refused such requests automatically.
 - `watcher.rs` and `board.rs` tail agent transcripts. A run's ID is passed as the agent's `--session-id`, so the board shows a run's live progress under that same ID.
 
 ## Run
@@ -18,7 +19,8 @@ cargo run -p backend
 # Stream every event as JSON
 cargo run -p backend -- --follow
 
-# Route a goal, start an agent on it and follow it until it exits
+# Route a goal, start an agent on it and follow it until it exits.
+# Permission requests are asked on the terminal: answer y or n.
 cargo run -p backend -- run "Which file in here is the largest?" --in C:\path\to\folder
 cargo run -p backend -- run "Fix the typo in the README" --in C:\dev\some-project
 ```

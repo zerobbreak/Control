@@ -11,9 +11,9 @@ pub mod orchestrator;
 pub mod router;
 pub mod watcher;
 
-pub use agent::{Agent, ClaudeCode};
+pub use agent::{Agent, Answer, ApprovalRequest, ClaudeCode};
 pub use board::{Board, BoardSnapshot, SessionStatus, SessionSummary};
 pub use events::{AgentEvent, AgentKind, EventKind};
-pub use orchestrator::{Orchestrator, RunStatus, RunSummary, RuntimeConfig, StartError};
+pub use orchestrator::{Orchestrator, PendingApproval, RunStatus, RunSummary, RuntimeConfig, StartError};
 pub use router::{Access, Decision, TaskKind, Tier};
 pub use watcher::{TranscriptWatcher, WatcherConfig};

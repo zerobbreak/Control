@@ -53,7 +53,7 @@ export type Decision = {
   reason: string;
 };
 
-export type RunStatus = "running" | "finished" | "failed" | "cancelled";
+export type RunStatus = "running" | "needsApproval" | "finished" | "failed" | "cancelled";
 
 /** One goal handed to one agent. `id` is also the agent's sessionId on the board. */
 export type RunSummary = {
@@ -68,4 +68,17 @@ export type RunSummary = {
   startedAt: string;
   endedAt: string | null;
   logPath: string;
+};
+
+/** An agent asking to use a tool its permission mode does not already allow. */
+export type PendingApproval = {
+  runId: string;
+  agent: AgentKind;
+  workdir: string;
+  requestId: string;
+  tool: string;
+  /** The command, file or URL the tool would act on. */
+  detail: string;
+  description: string | null;
+  askedAt: string;
 };

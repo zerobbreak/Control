@@ -3,12 +3,16 @@
 //! - `backend` prints a summary of every recent Claude Code and Gemini CLI session.
 //! - `backend --follow` streams every event as JSON.
 //! - `backend run "<goal>" [--in <folder>]` routes the goal, starts an agent on it and follows
-//!   that run until the agent exits.
+//!   that run until the agent exits, asking on the terminal whenever the agent needs permission.
 
+use std::io::Write;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
-use mission_control::{Board, ClaudeCode, EventKind, Orchestrator, RunStatus, RuntimeConfig, TranscriptWatcher, WatcherConfig};
+use mission_control::{
+    Answer, Board, ClaudeCode, EventKind, Orchestrator, RunStatus, RuntimeConfig, TranscriptWatcher, WatcherConfig,
+};
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -63,7 +67,7 @@ fn run(config: WatcherConfig, args: &[String]) {
     };
 
     let runtime = RuntimeConfig::from_home().expect("could not find the home directory");
-    let mut orchestrator = Orchestrator::new(runtime, vec![Box::new(ClaudeCode)]);
+    let mut orchestrator = Orchestrator::new(runtime, vec![Arc::new(ClaudeCode)]);
     let run = match orchestrator.start(&goal, folder.as_deref()) {
         Ok(run) => run,
         Err(err) => {
@@ -89,8 +93,24 @@ fn run(config: WatcherConfig, args: &[String]) {
                 _ => {}
             }
         }
+        for approval in orchestrator.approvals() {
+            let request = &approval.request;
+            if let Some(description) = &request.description {
+                println!("\n  {:?} wants to: {description}", approval.agent);
+            }
+            print!("  Allow {} · {}? [y/N] ", request.tool, request.detail);
+            let _ = std::io::stdout().flush();
+            let mut reply = String::new();
+            let _ = std::io::stdin().read_line(&mut reply);
+            let answer = if reply.trim().eq_ignore_ascii_case("y") {
+                Answer::Allow
+            } else {
+                Answer::Deny("The user denied this in Mission Control.".into())
+            };
+            orchestrator.answer(&approval.run_id, &request.request_id, answer);
+        }
         let status = orchestrator.runs()[0].status;
-        if status != RunStatus::Running {
+        if !matches!(status, RunStatus::Running | RunStatus::NeedsApproval) {
             let run = &orchestrator.runs()[0];
             println!("{status:?} (exit code {:?})", run.exit_code);
             std::process::exit(if status == RunStatus::Finished { 0 } else { 1 });

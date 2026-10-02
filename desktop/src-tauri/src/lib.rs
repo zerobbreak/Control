@@ -2,7 +2,10 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use mission_control::{Board, BoardSnapshot, ClaudeCode, Orchestrator, RunSummary, RuntimeConfig, TranscriptWatcher, WatcherConfig};
+use mission_control::{
+    Answer, Board, BoardSnapshot, ClaudeCode, Orchestrator, PendingApproval, RunSummary, RuntimeConfig, TranscriptWatcher,
+    WatcherConfig,
+};
 use tauri::{Emitter, LogicalSize, Manager, PhysicalPosition, WebviewWindow, WindowEvent};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(1500);
@@ -33,6 +36,23 @@ fn cancel_task(orchestrator: tauri::State<SharedOrchestrator>, id: String) -> bo
 #[tauri::command]
 fn runs_snapshot(orchestrator: tauri::State<SharedOrchestrator>) -> Vec<RunSummary> {
     orchestrator.lock().unwrap().runs()
+}
+
+#[tauri::command]
+fn approvals_snapshot(orchestrator: tauri::State<SharedOrchestrator>) -> Vec<PendingApproval> {
+    orchestrator.lock().unwrap().approvals()
+}
+
+/// Allows or denies a pending permission request. Returns false if it was no longer pending.
+#[tauri::command]
+fn answer_approval(
+    orchestrator: tauri::State<SharedOrchestrator>,
+    run_id: String,
+    request_id: String,
+    allow: bool,
+) -> bool {
+    let answer = if allow { Answer::Allow } else { Answer::Deny("The user denied this in Mission Control.".into()) };
+    orchestrator.lock().unwrap().answer(&run_id, &request_id, answer)
 }
 
 /// Gap between the top edge of the screen and the pill window.
@@ -88,13 +108,14 @@ fn spawn_watcher(app: tauri::AppHandle, board: SharedBoard, orchestrator: Shared
                 }
                 board.snapshot(chrono::Utc::now())
             };
-            let runs = {
+            let (runs, approvals) = {
                 let mut orchestrator = orchestrator.lock().unwrap();
                 orchestrator.poll();
-                orchestrator.runs()
+                (orchestrator.runs(), orchestrator.approvals())
             };
             let _ = app.emit("board-updated", snapshot);
             let _ = app.emit("runs-updated", runs);
+            let _ = app.emit("approvals-updated", approvals);
             std::thread::sleep(POLL_INTERVAL);
         }
     });
@@ -107,7 +128,7 @@ pub fn run() {
         .manage(SharedBoard::default())
         .setup(|app| {
             let runtime = RuntimeConfig::from_home().ok_or("could not find the home directory")?;
-            let orchestrator: SharedOrchestrator = Arc::new(Mutex::new(Orchestrator::new(runtime, vec![Box::new(ClaudeCode)])));
+            let orchestrator: SharedOrchestrator = Arc::new(Mutex::new(Orchestrator::new(runtime, vec![Arc::new(ClaudeCode)])));
             app.manage(orchestrator.clone());
             let board = app.state::<SharedBoard>().inner().clone();
             spawn_watcher(app.handle().clone(), board, orchestrator);
@@ -131,6 +152,8 @@ pub fn run() {
             start_task,
             cancel_task,
             runs_snapshot,
+            approvals_snapshot,
+            answer_approval,
             set_pill_size,
             open_dashboard,
             quit_app
