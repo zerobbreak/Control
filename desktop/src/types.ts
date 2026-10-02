@@ -39,3 +39,33 @@ export type BoardSnapshot = {
   sessions: SessionSummary[];
   feed: AgentEvent[];
 };
+
+// Mirrors backend/src/router.rs and backend/src/orchestrator.rs.
+
+export type TaskKind = "code" | "question" | "browse";
+export type Tier = "fast" | "balanced" | "strongest";
+export type Access = "readOnly" | "editFiles";
+
+export type Decision = {
+  task: TaskKind;
+  tier: Tier;
+  access: Access;
+  reason: string;
+};
+
+export type RunStatus = "running" | "finished" | "failed" | "cancelled";
+
+/** One goal handed to one agent. `id` is also the agent's sessionId on the board. */
+export type RunSummary = {
+  id: string;
+  goal: string;
+  workdir: string;
+  agent: AgentKind;
+  model: string;
+  decision: Decision;
+  status: RunStatus;
+  exitCode: number | null;
+  startedAt: string;
+  endedAt: string | null;
+  logPath: string;
+};

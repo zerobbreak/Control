@@ -220,6 +220,7 @@ dependencies = [
  "chrono",
  "serde",
  "serde_json",
+ "uuid",
 ]
 
 [[package]]
