@@ -4,7 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { BlobAvatar } from "./avatar/BlobAvatar";
 import { leadState, pillCrew, roleOf, sessionState, STATE_LABEL } from "./avatar/pillState";
-import type { BoardSnapshot } from "./types";
+import type { BoardSnapshot, SessionSummary } from "./types";
 import "./Pill.css";
 
 const COLLAPSED = { width: 240, height: 72 };
@@ -106,7 +106,7 @@ export default function Pill() {
                       <span className="project">{projectName(s.project)}</span>
                     </div>
                     <div className="agent-activity">
-                      {STATE_LABEL[sessionState(s)]} · {s.currentActivity ?? s.title ?? s.lastPrompt ?? "Waiting"}
+                      {STATE_LABEL[sessionState(s)]} · {activityText(s)}
                     </div>
                   </div>
                 </li>
@@ -139,6 +139,12 @@ export default function Pill() {
       </div>
     </div>
   );
+}
+
+/** What the agent is on right now. "Thinking" is already the row's state, so show the prompt instead. */
+function activityText(s: SessionSummary) {
+  const activity = s.currentActivity === "Thinking" ? null : s.currentActivity;
+  return activity ?? s.title ?? s.lastPrompt ?? "Waiting";
 }
 
 function projectName(path: string | null) {
