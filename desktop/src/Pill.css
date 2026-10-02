@@ -1,0 +1,314 @@
+:root {
+  --island: #0a0a0c;
+  --island-edge: rgba(255, 255, 255, 0.08);
+  --eye: #f4f4f5;
+  --text: #f4f4f5;
+  --muted: #a1a1aa;
+  --faint: rgba(255, 255, 255, 0.06);
+  --thinking: #a78bfa;
+  --working: #60a5fa;
+  --needs-you: #fbbf24;
+  --done: #4ade80;
+  --idle: #71717a;
+  --morph: 320ms cubic-bezier(0.32, 0.72, 0, 1);
+
+  font-family: Inter, "Segoe UI", system-ui, sans-serif;
+  font-size: 13px;
+  color: var(--text);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* The window itself is transparent; only the island is painted. */
+html,
+body,
+#root {
+  margin: 0;
+  height: 100%;
+  background: transparent;
+  overflow: hidden;
+  user-select: none;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+.stage {
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  height: 100%;
+  padding-top: 8px;
+}
+
+/* ---------- The island ---------- */
+
+.pill {
+  --accent: var(--idle);
+  position: relative;
+  min-width: 132px;
+  width: fit-content;
+  padding: 0 14px;
+  height: 36px;
+  border-radius: 18px;
+  background: var(--island);
+  border: 1px solid var(--island-edge);
+  box-shadow:
+    0 6px 18px rgba(0, 0, 0, 0.35),
+    0 0 0 0 transparent;
+  cursor: pointer;
+  overflow: hidden;
+  transition:
+    min-width var(--morph),
+    height var(--morph),
+    border-radius var(--morph),
+    box-shadow 400ms ease;
+}
+
+.pill:not(.expanded):hover {
+  min-width: 148px;
+}
+
+.pill.thinking { --accent: var(--thinking); }
+.pill.working { --accent: var(--working); }
+.pill.needs { --accent: var(--needs-you); }
+.pill.done { --accent: var(--done); }
+
+/* A soft halo in the state colour, so state reads even from the corner of your eye. */
+.pill:not(.idle) {
+  box-shadow:
+    0 6px 18px rgba(0, 0, 0, 0.35),
+    0 0 14px -2px color-mix(in srgb, var(--accent) 55%, transparent);
+}
+
+.pill.needs:not(.expanded) {
+  animation: nudge 2.4s ease-in-out infinite;
+}
+
+.pill.expanded {
+  min-width: 404px;
+  height: 360px;
+  border-radius: 26px;
+  cursor: default;
+}
+
+.pill-face {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  transition: opacity 160ms ease;
+}
+
+/* ---------- Blob avatars ---------- */
+
+.blob-avatar {
+  display: block;
+  flex: none;
+  overflow: visible;
+}
+
+.blob-eye {
+  fill: #0b0b0f;
+}
+
+.blob-smile {
+  fill: none;
+  stroke: #0b0b0f;
+  stroke-width: 0.085;
+  stroke-linecap: round;
+}
+
+.blob-ring {
+  fill: none;
+  stroke: var(--needs-you);
+  stroke-width: 0.07;
+}
+
+/* Agents sit beside Mission Control, set off by a hairline. */
+.crew {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding-left: 10px;
+  border-left: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+/* ---------- Expanded panel ---------- */
+
+.pill.expanded .pill-face {
+  display: none;
+}
+
+.panel {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 14px 16px 10px;
+  opacity: 0;
+  animation: fade-in 200ms ease 140ms forwards;
+}
+
+.panel-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--faint);
+}
+
+.panel-avatar {
+  display: grid;
+  place-items: center;
+  width: 52px;
+  height: 52px;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.panel-title {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  line-height: 1.3;
+}
+
+.panel-title span {
+  color: var(--accent);
+  font-size: 12px;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+
+.ghost {
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+}
+
+.ghost:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text);
+}
+
+.agents {
+  flex: 1;
+  margin: 0;
+  padding: 8px 0;
+  list-style: none;
+  overflow-y: auto;
+}
+
+.agents li {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 7px 4px;
+}
+
+.agents li > div {
+  min-width: 0;
+}
+
+.agents .empty {
+  color: var(--muted);
+  justify-content: center;
+  padding-top: 40px;
+}
+
+.agent-name {
+  font-weight: 600;
+}
+
+.project {
+  margin-left: 8px;
+  color: var(--muted);
+  font-weight: 400;
+  font-size: 12px;
+}
+
+.agent-activity {
+  color: var(--muted);
+  font-size: 12px;
+  display: -webkit-box;
+  -webkit-line-clamp: 1;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.ask {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid transparent;
+  transition: border-color 160ms ease;
+}
+
+.ask:focus-within {
+  border-color: color-mix(in srgb, var(--accent) 60%, transparent);
+}
+
+.ask span {
+  color: var(--muted);
+}
+
+.ask input {
+  flex: 1;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+}
+
+.ask input::placeholder {
+  color: var(--muted);
+}
+
+.panel-foot {
+  display: flex;
+  justify-content: flex-end;
+  padding-top: 6px;
+}
+
+.link {
+  border: none;
+  background: none;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.link:hover {
+  color: var(--text);
+}
+
+/* ---------- Motion ---------- */
+
+@keyframes nudge {
+  0%, 100% { transform: translateY(0); }
+  8% { transform: translateY(2px); }
+  16% { transform: translateY(0); }
+}
+
+@keyframes fade-in {
+  to { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0s !important;
+    transition-duration: 0s !important;
+  }
+}
