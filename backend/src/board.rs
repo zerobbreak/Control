@@ -118,6 +118,12 @@ impl Board {
         }
     }
 
+    /// Drops every session, and its events, that `keep` rejects.
+    pub fn forget_sessions_except(&mut self, keep: impl Fn(&str) -> bool) {
+        self.sessions.retain(|(_, id), _| keep(id));
+        self.feed.retain(|e| keep(&e.session_id));
+    }
+
     pub fn snapshot(&self, now: DateTime<Utc>) -> BoardSnapshot {
         let mut sessions: Vec<SessionSummary> = self
             .sessions

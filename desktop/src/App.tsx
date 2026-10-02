@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import CommandCentre from "./CommandCentre";
 import type { AgentEvent, BoardSnapshot, SessionStatus, SessionSummary } from "./types";
 import "./App.css";
 
@@ -16,6 +17,7 @@ function App() {
   const [board, setBoard] = useState<BoardSnapshot>({ sessions: [], feed: [] });
   const [showIdle, setShowIdle] = useState(false);
   const [selected, setSelected] = useState<string | null>(null);
+  const [view, setView] = useState<"activity" | "command">("activity");
 
   useEffect(() => {
     invoke<BoardSnapshot>("board_snapshot").then(setBoard);
@@ -44,6 +46,22 @@ function App() {
     <div className="app">
       <header className="topbar">
         <h1>Mission Control</h1>
+        <nav className="tabs" aria-label="Views">
+          <button
+            className={view === "activity" ? "on" : ""}
+            aria-current={view === "activity" ? "page" : undefined}
+            onClick={() => setView("activity")}
+          >
+            Activity
+          </button>
+          <button
+            className={view === "command" ? "on" : ""}
+            aria-current={view === "command" ? "page" : undefined}
+            onClick={() => setView("command")}
+          >
+            Command Centre
+          </button>
+        </nav>
         <div className="counts">
           <span className="count working">{counts.working} working</span>
           <span className="count stalled">{counts.stalled} stalled</span>
@@ -65,40 +83,46 @@ function App() {
         </form>
       </header>
 
-      <main className="layout">
-        <section className="sessions">
-          <div className="section-head">
-            <h2>Agents</h2>
-            <label>
-              <input type="checkbox" checked={showIdle} onChange={(e) => setShowIdle(e.target.checked)} />
-              Show idle
-            </label>
-          </div>
-          {sessions.length === 0 && (
-            <p className="empty">No active Claude Code or Gemini CLI sessions in the last 15 minutes.</p>
-          )}
-          {sessions.map((s) => (
-            <SessionCard
-              key={`${s.agent}:${s.sessionId}`}
-              session={s}
-              selected={selected === s.sessionId}
-              onSelect={() => setSelected(selected === s.sessionId ? null : s.sessionId)}
-            />
-          ))}
-        </section>
-
-        <section className="feed">
-          <div className="section-head">
-            <h2>{selected ? "Session activity" : "Live activity"}</h2>
-            {selected && <button className="link" onClick={() => setSelected(null)}>Show all</button>}
-          </div>
-          <ol>
-            {feed.map((e, i) => (
-              <FeedItem key={`${e.sessionId}:${e.timestamp}:${i}`} event={e} />
+      {view === "command" ? (
+        <main className="cc-scroll">
+          <CommandCentre />
+        </main>
+      ) : (
+        <main className="layout">
+          <section className="sessions">
+            <div className="section-head">
+              <h2>Agents</h2>
+              <label>
+                <input type="checkbox" checked={showIdle} onChange={(e) => setShowIdle(e.target.checked)} />
+                Show idle
+              </label>
+            </div>
+            {sessions.length === 0 && (
+              <p className="empty">No active Claude Code or Gemini CLI sessions in the last 15 minutes.</p>
+            )}
+            {sessions.map((s) => (
+              <SessionCard
+                key={`${s.agent}:${s.sessionId}`}
+                session={s}
+                selected={selected === s.sessionId}
+                onSelect={() => setSelected(selected === s.sessionId ? null : s.sessionId)}
+              />
             ))}
-          </ol>
-        </section>
-      </main>
+          </section>
+
+          <section className="feed">
+            <div className="section-head">
+              <h2>{selected ? "Session activity" : "Live activity"}</h2>
+              {selected && <button className="link" onClick={() => setSelected(null)}>Show all</button>}
+            </div>
+            <ol>
+              {feed.map((e, i) => (
+                <FeedItem key={`${e.sessionId}:${e.timestamp}:${i}`} event={e} />
+              ))}
+            </ol>
+          </section>
+        </main>
+      )}
     </div>
   );
 }

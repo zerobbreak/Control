@@ -252,3 +252,227 @@ button {
 .feed-item.toolResult .icon,
 .feed-item.error .icon,
 .feed-item.error .text { color: var(--error); }
+
+/* ---------- Views ---------- */
+
+.tabs {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 8px;
+  background: var(--bg);
+}
+
+.tabs button {
+  padding: 5px 12px;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.tabs button.on {
+  background: var(--panel-2);
+  color: var(--text);
+}
+
+/* ---------- Command Centre ---------- */
+
+.cc-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.command-centre {
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 24px 20px 48px;
+}
+
+.cc-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 20px;
+}
+
+.cc-head h2 {
+  margin: 0 0 4px;
+  font-size: 18px;
+}
+
+.cc-head p,
+.cc-text p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.save { font-size: 12px; color: var(--muted); white-space: nowrap; }
+.save.ok { color: var(--working); }
+.save.error { color: var(--error); white-space: normal; }
+
+.cc-section { margin-bottom: 24px; }
+
+.cc-section h3 {
+  margin: 0 0 8px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.cc-rows {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel);
+}
+
+.cc-section.danger .cc-rows { border-color: color-mix(in srgb, var(--error) 45%, var(--border)); }
+.cc-section.danger h3 { color: var(--error); }
+
+.cc-row {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  padding: 14px 16px;
+}
+
+.cc-row + .cc-row { border-top: 1px solid var(--border); }
+
+.cc-text { flex: 1; min-width: 0; }
+.cc-label { font-weight: 600; margin-bottom: 2px; }
+.cc-control { flex: none; }
+
+.switch {
+  position: relative;
+  flex: none;
+  width: 40px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: var(--bg);
+  transition: background 150ms ease;
+}
+
+.switch span {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--muted);
+  transition: transform 150ms ease, background 150ms ease;
+}
+
+.switch.on { background: var(--waiting); border-color: var(--waiting); }
+.switch.on span { transform: translateX(18px); background: #fff; }
+.cc-section.danger .switch.on { background: var(--error); border-color: var(--error); }
+
+.segmented {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+}
+
+.segmented button {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-width: 82px;
+  padding: 5px 10px;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.segmented button span { font-size: 11px; opacity: 0.8; }
+.segmented button.on { background: var(--panel-2); color: var(--text); }
+
+.budget {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 140px;
+  color: var(--muted);
+}
+
+.cc-row.list {
+  flex-wrap: wrap;
+  gap: 10px 24px;
+}
+
+.cc-row.list .cc-text { flex-basis: 100%; }
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.chips:empty { display: none; }
+
+.chips li {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 4px 3px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel-2);
+  font-size: 13px;
+}
+
+.chips button {
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: 4px;
+  background: none;
+  color: var(--muted);
+}
+
+.chips button:hover { color: var(--text); background: var(--border); }
+
+.add {
+  display: flex;
+  gap: 8px;
+  flex-basis: 100%;
+}
+
+.add button,
+.ghost-button {
+  padding: 7px 14px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel-2);
+}
+
+.add button:disabled { opacity: 0.5; cursor: default; }
+
+.mono { font-family: ui-monospace, Consolas, monospace; }
+
+.confirm { display: flex; gap: 8px; }
+
+.danger-button {
+  padding: 7px 14px;
+  border: none;
+  border-radius: 6px;
+  background: var(--error);
+  color: #fff;
+  font-weight: 600;
+}

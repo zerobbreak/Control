@@ -1,5 +1,6 @@
 //! Turns a goal into a running agent: routes it, picks an agent that can do it, starts the
 //! process, answers or forwards its permission requests and keeps track of it until it exits.
+//! The Command Centre's settings bound every step.
 //!
 //! Progress inside a run is not read here. Each run uses a session ID chosen up front, so the
 //! transcript watcher reports its events under that same ID on the board.
@@ -16,20 +17,27 @@ use serde::Serialize;
 
 use crate::agent::{Agent, Answer, ApprovalRequest, HostMessage, Launch};
 use crate::events::AgentKind;
-use crate::router::{self, Access, Decision};
+use crate::router::{self, Access, Decision, Tier};
+use crate::settings::Settings;
 
 pub struct RuntimeConfig {
     /// One log file per run, holding everything the agent wrote.
     pub runs_dir: PathBuf,
     /// Where goals that are not about any folder run.
     pub scratch_dir: PathBuf,
+    /// The Command Centre's settings.
+    pub settings_path: PathBuf,
 }
 
 impl RuntimeConfig {
     pub fn from_home() -> Option<Self> {
         let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))?;
         let root = PathBuf::from(home).join(".mission-control");
-        Some(Self { runs_dir: root.join("runs"), scratch_dir: root.join("scratch") })
+        Some(Self {
+            runs_dir: root.join("runs"),
+            scratch_dir: root.join("scratch"),
+            settings_path: root.join("settings.json"),
+        })
     }
 }
 
@@ -60,6 +68,9 @@ pub struct RunSummary {
     pub started_at: DateTime<Utc>,
     pub ended_at: Option<DateTime<Utc>>,
     pub log_path: String,
+    /// Requests the Command Centre's rules answered without asking.
+    pub auto_allowed: u32,
+    pub auto_denied: u32,
 }
 
 /// A permission request waiting for an answer.
@@ -79,6 +90,8 @@ pub struct PendingApproval {
 pub enum StartError {
     EmptyGoal,
     MissingFolder(PathBuf),
+    /// The Command Centre does not allow runs in this folder.
+    FolderNotAllowed(PathBuf),
     /// No registered agent can do this kind of task yet.
     NoAgent(Decision),
     Spawn(std::io::Error),
@@ -89,7 +102,10 @@ impl std::fmt::Display for StartError {
         match self {
             Self::EmptyGoal => write!(f, "the goal is empty"),
             Self::MissingFolder(path) => write!(f, "{} is not a folder", path.display()),
-            Self::NoAgent(d) => write!(f, "no agent can handle {:?} tasks yet", d.task),
+            Self::FolderNotAllowed(path) => {
+                write!(f, "the Command Centre does not allow runs in {}", path.display())
+            }
+            Self::NoAgent(d) => write!(f, "no enabled agent can handle {:?} tasks", d.task),
             Self::Spawn(err) => write!(f, "could not start the agent: {err}"),
         }
     }
@@ -100,6 +116,7 @@ impl std::error::Error for StartError {}
 /// What a read-only run is told when it asks for anything beyond reading.
 const READ_ONLY_REFUSAL: &str =
     "This run is read-only: Mission Control started it to answer a question, not to change anything.";
+const LOCKDOWN_REASON: &str = " Read-only, because read-only mode is on in the Command Centre.";
 
 struct Run {
     summary: RunSummary,
@@ -111,6 +128,7 @@ struct Run {
 
 pub struct Orchestrator {
     config: RuntimeConfig,
+    settings: Settings,
     agents: Vec<Arc<dyn Agent>>,
     runs: Vec<Run>,
     pending: Vec<PendingApproval>,
@@ -123,7 +141,25 @@ impl Orchestrator {
     /// `agents` are tried in order; the first that handles a task gets it.
     pub fn new(config: RuntimeConfig, agents: Vec<Arc<dyn Agent>>) -> Self {
         let (outbox, inbox) = mpsc::channel();
-        Self { config, agents, runs: Vec::new(), pending: Vec::new(), inbox, outbox }
+        let settings = Settings::load(&config.settings_path);
+        Self { config, settings, agents, runs: Vec::new(), pending: Vec::new(), inbox, outbox }
+    }
+
+    pub fn settings(&self) -> &Settings {
+        &self.settings
+    }
+
+    /// Applies new Command Centre settings to future runs and requests, and saves them.
+    pub fn update_settings(&mut self, settings: Settings) -> std::io::Result<Settings> {
+        let settings = settings.normalized();
+        settings.save(&self.config.settings_path)?;
+        self.settings = settings.clone();
+        Ok(settings)
+    }
+
+    /// Whether this session ID belongs to a run Mission Control started.
+    pub fn owns_session(&self, session_id: &str) -> bool {
+        self.runs.iter().any(|r| r.summary.id == session_id)
     }
 
     /// Routes `goal`, starts an agent on it in `folder` (or the scratch folder) and returns the run.
@@ -133,21 +169,35 @@ impl Orchestrator {
             return Err(StartError::EmptyGoal);
         }
         let workdir = match folder {
-            Some(dir) if dir.is_dir() => dir.to_path_buf(),
-            Some(dir) => return Err(StartError::MissingFolder(dir.to_path_buf())),
+            Some(dir) if !dir.is_dir() => return Err(StartError::MissingFolder(dir.to_path_buf())),
+            Some(dir) if !self.settings.allows_folder(dir) => {
+                return Err(StartError::FolderNotAllowed(dir.to_path_buf()));
+            }
+            Some(dir) => dir.to_path_buf(),
             None => {
                 fs::create_dir_all(&self.config.scratch_dir).map_err(StartError::Spawn)?;
                 self.config.scratch_dir.clone()
             }
         };
 
-        let decision = router::route(goal);
-        let Some(agent) = self.agents.iter().find(|a| a.handles(decision.task)).cloned() else {
+        let decision = bounded(router::route(goal), &self.settings);
+        let settings = &self.settings;
+        let Some(agent) =
+            self.agents.iter().find(|a| a.handles(decision.task) && settings.agent_enabled(a.kind())).cloned()
+        else {
             return Err(StartError::NoAgent(decision));
         };
 
         let id = uuid::Uuid::new_v4().to_string();
-        let launch = Launch { session_id: &id, goal, workdir: &workdir, tier: decision.tier, access: decision.access };
+        let launch = Launch {
+            session_id: &id,
+            goal,
+            workdir: &workdir,
+            tier: decision.tier,
+            access: decision.access,
+            ask_before_edits: self.settings.ask_before_edits,
+            max_budget_usd: self.settings.max_budget_usd,
+        };
         fs::create_dir_all(&self.config.runs_dir).map_err(StartError::Spawn)?;
         let log_path = self.config.runs_dir.join(format!("{id}.log"));
         let log = File::create(&log_path).map_err(StartError::Spawn)?;
@@ -173,6 +223,8 @@ impl Orchestrator {
             started_at: Utc::now(),
             ended_at: None,
             log_path: log_path.display().to_string(),
+            auto_allowed: 0,
+            auto_denied: 0,
         };
         self.runs.push(Run { summary: summary.clone(), agent, child: Some(child), stdin: Some(stdin) });
         Ok(summary)
@@ -219,12 +271,15 @@ impl Orchestrator {
             let Some(run) = self.runs.iter_mut().find(|r| r.summary.id == run_id) else { continue };
             match message {
                 HostMessage::Finished => run.stdin = None,
-                // The run's access level is Mission Control's promise to the user, so it is
-                // enforced here rather than trusted to the agent's own permission mode.
-                HostMessage::Approval(request) if run.summary.decision.access == Access::ReadOnly => {
-                    send(run, &request, &Answer::Deny(READ_ONLY_REFUSAL.into()));
-                }
                 HostMessage::Approval(request) => {
+                    if let Some(answer) = auto_answer(&self.settings, run.summary.decision.access, &request) {
+                        match answer {
+                            Answer::Allow => run.summary.auto_allowed += 1,
+                            Answer::Deny(_) => run.summary.auto_denied += 1,
+                        }
+                        send(run, &request, &answer);
+                        continue;
+                    }
                     run.summary.status = RunStatus::NeedsApproval;
                     self.pending.push(PendingApproval {
                         run_id,
@@ -280,6 +335,38 @@ impl Drop for Orchestrator {
                 let _ = child.kill();
             }
         }
+    }
+}
+
+/// Applies the Command Centre's limits to the router's decision.
+fn bounded(mut decision: Decision, settings: &Settings) -> Decision {
+    if decision.tier > settings.max_tier {
+        decision.tier = settings.max_tier;
+        let name = match settings.max_tier {
+            Tier::Fast => "fast",
+            Tier::Balanced => "balanced",
+            Tier::Strongest => "strongest",
+        };
+        decision.reason.push_str(&format!(" Capped at the {name} model in the Command Centre."));
+    }
+    if settings.read_only_mode && decision.access != Access::ReadOnly {
+        decision.access = Access::ReadOnly;
+        decision.reason.push_str(LOCKDOWN_REASON);
+    }
+    decision
+}
+
+/// The answer the Command Centre's rules give a request without asking, if any.
+///
+/// A run's read-only access is Mission Control's promise to the user, so it is enforced here
+/// rather than trusted to the agent's own permission mode, and it outranks full autonomy.
+fn auto_answer(settings: &Settings, access: Access, request: &ApprovalRequest) -> Option<Answer> {
+    if access == Access::ReadOnly {
+        Some(Answer::Deny(READ_ONLY_REFUSAL.into()))
+    } else if settings.full_autonomy || settings.auto_approves(&request.detail) {
+        Some(Answer::Allow)
+    } else {
+        None
     }
 }
 
@@ -367,7 +454,11 @@ mod tests {
 
     fn orchestrator(args: &[&str]) -> (Orchestrator, PathBuf) {
         let root = std::env::temp_dir().join(format!("mc-test-{}", uuid::Uuid::new_v4()));
-        let config = RuntimeConfig { runs_dir: root.join("runs"), scratch_dir: root.join("scratch") };
+        let config = RuntimeConfig {
+            runs_dir: root.join("runs"),
+            scratch_dir: root.join("scratch"),
+            settings_path: root.join("settings.json"),
+        };
         let agent = FakeAgent { args: args.iter().map(|a| a.to_string()).collect() };
         (Orchestrator::new(config, vec![Arc::new(agent)]), root)
     }
@@ -459,6 +550,77 @@ mod tests {
         assert!(matches!(orch.start("Open YouTube and play lofi", None), Err(StartError::NoAgent(_))));
         assert!(matches!(orch.start("  ", None), Err(StartError::EmptyGoal)));
         assert!(orch.runs().is_empty());
+    }
+
+    fn set(orch: &mut Orchestrator, change: impl FnOnce(&mut Settings)) {
+        let mut settings = orch.settings().clone();
+        change(&mut settings);
+        orch.update_settings(settings).unwrap();
+    }
+
+    #[test]
+    fn command_centre_rules_answer_requests_without_asking() {
+        let (mut orch, root) = orchestrator(WAITS_FOR_STDIN);
+        let run = orch.start("Add a logout button", None).unwrap();
+
+        set(&mut orch, |s| s.auto_approve = vec!["npm install".into()]);
+        ask(&orch, &run.id, "listed");
+        orch.poll();
+        assert!(orch.approvals().is_empty());
+
+        set(&mut orch, |s| s.auto_approve.clear());
+        ask(&orch, &run.id, "unlisted");
+        orch.poll();
+        assert_eq!(orch.approvals().len(), 1);
+
+        set(&mut orch, |s| s.full_autonomy = true);
+        ask(&orch, &run.id, "autonomous");
+        orch.poll();
+        assert_eq!(orch.approvals().len(), 1, "only the request asked before autonomy was on is waiting");
+        assert_eq!(orch.runs()[0].auto_allowed, 2);
+
+        orch.cancel(&run.id);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn read_only_beats_full_autonomy() {
+        let (mut orch, root) = orchestrator(WAITS_FOR_STDIN);
+        set(&mut orch, |s| {
+            s.full_autonomy = true;
+            s.read_only_mode = true;
+        });
+        let run = orch.start("Add a logout button", None).unwrap();
+        assert_eq!(run.decision.access, Access::ReadOnly);
+        assert!(run.decision.reason.contains("read-only mode"));
+
+        ask(&orch, &run.id, "r1");
+        orch.poll();
+        assert_eq!((orch.runs()[0].auto_allowed, orch.runs()[0].auto_denied), (0, 1));
+        orch.cancel(&run.id);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn command_centre_limits_where_and_how_runs_start() {
+        let (mut orch, root) = orchestrator(&["--version"]);
+
+        set(&mut orch, |s| s.max_tier = Tier::Fast);
+        let run = orch.start("Refactor the auth module", None).unwrap();
+        assert_eq!(run.decision.tier, Tier::Fast);
+        assert!(run.decision.reason.contains("Capped"));
+
+        set(&mut orch, |s| s.allowed_folders = vec![root.join("scratch")]);
+        let elsewhere = std::env::temp_dir();
+        assert!(matches!(orch.start("Add a button", Some(&elsewhere)), Err(StartError::FolderNotAllowed(_))));
+        assert!(orch.start("Add a button", None).is_ok(), "the scratch folder is always allowed");
+
+        set(&mut orch, |s| s.claude_enabled = false);
+        assert!(matches!(orch.start("Add a button", None), Err(StartError::NoAgent(_))));
+
+        let saved = Settings::load(&root.join("settings.json"));
+        assert!(!saved.claude_enabled && saved.max_tier == Tier::Fast);
+        let _ = fs::remove_dir_all(root);
     }
 
 }

@@ -1,10 +1,11 @@
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use mission_control::{
-    Answer, Board, BoardSnapshot, ClaudeCode, Orchestrator, PendingApproval, RunSummary, RuntimeConfig, TranscriptWatcher,
-    WatcherConfig,
+    Answer, Board, BoardSnapshot, ClaudeCode, Orchestrator, PendingApproval, RunSummary, RuntimeConfig, Settings,
+    TranscriptWatcher, WatcherConfig,
 };
 use tauri::{Emitter, LogicalSize, Manager, PhysicalPosition, WebviewWindow, WindowEvent};
 
@@ -31,6 +32,23 @@ fn start_task(
 #[tauri::command]
 fn cancel_task(orchestrator: tauri::State<SharedOrchestrator>, id: String) -> bool {
     orchestrator.lock().unwrap().cancel(&id)
+}
+
+#[tauri::command]
+fn get_settings(orchestrator: tauri::State<SharedOrchestrator>) -> Settings {
+    orchestrator.lock().unwrap().settings().clone()
+}
+
+/// Saves new Command Centre settings and returns them as stored, after clean-up.
+#[tauri::command]
+fn update_settings(
+    app: tauri::AppHandle,
+    orchestrator: tauri::State<SharedOrchestrator>,
+    settings: Settings,
+) -> Result<Settings, String> {
+    let saved = orchestrator.lock().unwrap().update_settings(settings).map_err(|e| e.to_string())?;
+    let _ = app.emit("settings-updated", saved.clone());
+    Ok(saved)
 }
 
 #[tauri::command]
@@ -92,6 +110,7 @@ fn quit_app(app: tauri::AppHandle) {
 
 /// Tails agent transcripts in the background and pushes a fresh board and run list to the UI on
 /// every poll, so time-based statuses such as "stalled" update even when no new events arrive.
+/// With "watch other sessions" off in the Command Centre, only Mission Control's own runs are read.
 fn spawn_watcher(app: tauri::AppHandle, board: SharedBoard, orchestrator: SharedOrchestrator) {
     let Some(config) = WatcherConfig::from_home() else {
         eprintln!("mission-control: could not find the home directory; agent monitoring is off");
@@ -100,18 +119,24 @@ fn spawn_watcher(app: tauri::AppHandle, board: SharedBoard, orchestrator: Shared
     std::thread::spawn(move || {
         let mut watcher = TranscriptWatcher::new(config);
         loop {
+            let (runs, approvals, watch_all) = {
+                let mut orchestrator = orchestrator.lock().unwrap();
+                orchestrator.poll();
+                (orchestrator.runs(), orchestrator.approvals(), orchestrator.settings().watch_other_sessions)
+            };
+            let own: HashSet<String> = runs.iter().map(|r| r.id.clone()).collect();
+            watcher.restrict_to(if watch_all { None } else { Some(own.clone()) });
+
             let events = watcher.poll();
             let snapshot = {
                 let mut board = board.lock().unwrap();
                 for event in events {
                     board.apply(event);
                 }
+                if !watch_all {
+                    board.forget_sessions_except(|id| own.contains(id));
+                }
                 board.snapshot(chrono::Utc::now())
-            };
-            let (runs, approvals) = {
-                let mut orchestrator = orchestrator.lock().unwrap();
-                orchestrator.poll();
-                (orchestrator.runs(), orchestrator.approvals())
             };
             let _ = app.emit("board-updated", snapshot);
             let _ = app.emit("runs-updated", runs);
@@ -152,6 +177,8 @@ pub fn run() {
             start_task,
             cancel_task,
             runs_snapshot,
+            get_settings,
+            update_settings,
             approvals_snapshot,
             answer_approval,
             set_pill_size,

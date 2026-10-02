@@ -68,6 +68,9 @@ export type RunSummary = {
   startedAt: string;
   endedAt: string | null;
   logPath: string;
+  /** Requests the Command Centre's rules answered without asking. */
+  autoAllowed: number;
+  autoDenied: number;
 };
 
 /** An agent asking to use a tool its permission mode does not already allow. */
@@ -81,4 +84,17 @@ export type PendingApproval = {
   detail: string;
   description: string | null;
   askedAt: string;
+};
+
+/** Mirrors backend/src/settings.rs: what the user lets Mission Control and its agents do. */
+export type Settings = {
+  claudeEnabled: boolean;
+  watchOtherSessions: boolean;
+  maxTier: Tier;
+  maxBudgetUsd: number | null;
+  askBeforeEdits: boolean;
+  autoApprove: string[];
+  readOnlyMode: boolean;
+  fullAutonomy: boolean;
+  allowedFolders: string[];
 };

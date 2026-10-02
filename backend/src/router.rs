@@ -3,7 +3,7 @@
 //! These are plain rules for now. Once runs record whether they succeeded, the same `Decision`
 //! can be informed by that history instead.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -16,8 +16,8 @@ pub enum TaskKind {
     Browse,
 }
 
-/// How capable (and slow, and costly) a model the task deserves.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+/// How capable (and slow, and costly) a model the task deserves, weakest first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Tier {
     Fast,

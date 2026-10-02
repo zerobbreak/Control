@@ -19,6 +19,10 @@ pub struct Launch<'a> {
     pub workdir: &'a Path,
     pub tier: Tier,
     pub access: Access,
+    /// Send file edits for approval too, instead of letting code runs edit freely.
+    pub ask_before_edits: bool,
+    /// Stop the run once it has spent this much, in US dollars.
+    pub max_budget_usd: Option<f64>,
 }
 
 /// An agent asking to use a tool its permission mode does not already allow.
@@ -91,6 +95,7 @@ impl Agent for ClaudeCode {
         // Mission Control as a `can_use_tool` request on stdout.
         let permission_mode = match launch.access {
             Access::ReadOnly => "plan",
+            Access::EditFiles if launch.ask_before_edits => "default",
             Access::EditFiles => "acceptEdits",
         };
         let mut cmd = Command::new("claude");
@@ -102,6 +107,9 @@ impl Agent for ClaudeCode {
             .args(["--session-id", launch.session_id])
             .args(["--permission-mode", permission_mode])
             .args(["--name", &truncate(launch.goal, 60)]);
+        if let Some(usd) = launch.max_budget_usd {
+            cmd.args(["--max-budget-usd", &format!("{usd:.2}")]);
+        }
         cmd
     }
 
@@ -161,6 +169,8 @@ mod tests {
             workdir: Path::new("."),
             tier: Tier::Strongest,
             access,
+            ask_before_edits: false,
+            max_budget_usd: None,
         }
     }
 
@@ -177,6 +187,22 @@ mod tests {
         // The goal itself goes in on stdin; the command line only names the session after it.
         assert_eq!(after("--name"), Some("fix the login"));
         assert_eq!(args.iter().filter(|a| *a == "fix the login").count(), 1);
+        assert_eq!(after("--max-budget-usd"), None);
+    }
+
+    #[test]
+    fn command_centre_limits_reach_the_command_line() {
+        let mut launch = launch(Access::EditFiles);
+        let mode = |launch: &Launch| {
+            let cmd = ClaudeCode.command(launch);
+            let args: Vec<_> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+            let i = args.iter().position(|a| a == "--permission-mode").unwrap();
+            (args[i + 1].clone(), args.iter().position(|a| a == "--max-budget-usd").map(|i| args[i + 1].clone()))
+        };
+        assert_eq!(mode(&launch), ("acceptEdits".into(), None));
+        launch.ask_before_edits = true;
+        launch.max_budget_usd = Some(1.5);
+        assert_eq!(mode(&launch), ("default".into(), Some("1.50".into())));
     }
 
     // Recorded from Claude Code 2.1.288.
