@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import ChangesPanel from "./ChangesPanel";
 import CommandCentre from "./CommandCentre";
-import type { AgentEvent, BoardSnapshot, SessionStatus, SessionSummary } from "./types";
+import type { AgentEvent, BoardSnapshot, RunSummary, SessionStatus, SessionSummary } from "./types";
 import "./App.css";
 
 const STATUS_LABEL: Record<SessionStatus, string> = {
@@ -17,7 +18,8 @@ function App() {
   const [board, setBoard] = useState<BoardSnapshot>({ sessions: [], feed: [] });
   const [showIdle, setShowIdle] = useState(false);
   const [selected, setSelected] = useState<string | null>(null);
-  const [view, setView] = useState<"activity" | "command">("activity");
+  const [view, setView] = useState<"activity" | "changes" | "command">("activity");
+  const [runs, setRuns] = useState<RunSummary[]>([]);
 
   useEffect(() => {
     invoke<BoardSnapshot>("board_snapshot").then(setBoard);
@@ -26,6 +28,20 @@ function App() {
       unlisten.then((stop) => stop());
     };
   }, []);
+
+  useEffect(() => {
+    invoke<RunSummary[]>("runs_snapshot").then(setRuns);
+    const unlisten = listen<RunSummary[]>("runs-updated", (e) => setRuns(e.payload));
+    return () => {
+      unlisten.then((stop) => stop());
+    };
+  }, []);
+
+  // Every folder an agent has worked in, newest first, for the Changes view.
+  const folders = useMemo(
+    () => [...new Set([...runs.map((r) => r.workdir), ...board.sessions.flatMap((s) => (s.project ? [s.project] : []))])],
+    [runs, board.sessions],
+  );
 
   async function startTask(prompt: string) {
     const response = await invoke<string>("start_task", { prompt });
@@ -53,6 +69,13 @@ function App() {
             onClick={() => setView("activity")}
           >
             Activity
+          </button>
+          <button
+            className={view === "changes" ? "on" : ""}
+            aria-current={view === "changes" ? "page" : undefined}
+            onClick={() => setView("changes")}
+          >
+            Changes
           </button>
           <button
             className={view === "command" ? "on" : ""}
@@ -87,6 +110,8 @@ function App() {
         <main className="cc-scroll">
           <CommandCentre />
         </main>
+      ) : view === "changes" ? (
+        <ChangesPanel folders={folders} />
       ) : (
         <main className="layout">
           <section className="sessions">

@@ -18,7 +18,8 @@ use serde::Serialize;
 use crate::agent::{Agent, Answer, ApprovalRequest, HostMessage, Launch};
 use crate::events::AgentKind;
 use crate::router::{self, Access, Decision, Tier};
-use crate::settings::Settings;
+use crate::git::{self, GitAction, GitRepo};
+use crate::settings::{GitRule, Settings};
 
 pub struct RuntimeConfig {
     /// One log file per run, holding everything the agent wrote.
@@ -272,7 +273,8 @@ impl Orchestrator {
             match message {
                 HostMessage::Finished => run.stdin = None,
                 HostMessage::Approval(request) => {
-                    if let Some(answer) = auto_answer(&self.settings, run.summary.decision.access, &request) {
+                    let workdir = Path::new(&run.summary.workdir);
+                    if let Some(answer) = auto_answer(&self.settings, run.summary.decision.access, &request, workdir) {
                         match answer {
                             Answer::Allow => run.summary.auto_allowed += 1,
                             Answer::Deny(_) => run.summary.auto_denied += 1,
@@ -359,11 +361,31 @@ fn bounded(mut decision: Decision, settings: &Settings) -> Decision {
 /// The answer the Command Centre's rules give a request without asking, if any.
 ///
 /// A run's read-only access is Mission Control's promise to the user, so it is enforced here
-/// rather than trusted to the agent's own permission mode, and it outranks full autonomy.
-fn auto_answer(settings: &Settings, access: Access, request: &ApprovalRequest) -> Option<Answer> {
+/// rather than trusted to the agent's own permission mode, and it outranks everything else.
+/// Git rules come next: "never" and protected branches outrank full autonomy.
+fn auto_answer(settings: &Settings, access: Access, request: &ApprovalRequest, workdir: &Path) -> Option<Answer> {
     if access == Access::ReadOnly {
-        Some(Answer::Deny(READ_ONLY_REFUSAL.into()))
-    } else if settings.full_autonomy || settings.auto_approves(&request.detail) {
+        return Some(Answer::Deny(READ_ONLY_REFUSAL.into()));
+    }
+    if let Some(action) = request.input["command"].as_str().and_then(git::classify) {
+        let (rule, what) = match action {
+            GitAction::Commit => (settings.agent_commit, "Committing"),
+            GitAction::Publish => (settings.agent_push, "Pushing and publishing to GitHub"),
+        };
+        if rule == GitRule::Never {
+            return Some(Answer::Deny(format!(
+                "{what} is turned off for agents in Mission Control's Command Centre. Leave it to the user."
+            )));
+        }
+        let branch = GitRepo::open(workdir).ok().and_then(|repo| repo.current_branch());
+        if branch.is_some_and(|b| settings.protected_branches.contains(&b)) {
+            return None;
+        }
+        if rule == GitRule::Allow {
+            return Some(Answer::Allow);
+        }
+    }
+    if settings.full_autonomy || settings.auto_approves(&request.detail) {
         Some(Answer::Allow)
     } else {
         None
@@ -623,4 +645,54 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    fn ask_command(orch: &Orchestrator, run_id: &str, request_id: &str, command: &str) {
+        let request = ApprovalRequest {
+            request_id: request_id.into(),
+            tool: "Bash".into(),
+            detail: command.into(),
+            description: None,
+            input: serde_json::json!({ "command": command }),
+        };
+        orch.outbox.send((run_id.into(), HostMessage::Approval(request))).unwrap();
+    }
+
+    #[test]
+    fn git_rules_outrank_autonomy_and_protect_branches() {
+        let (mut orch, root) = orchestrator(WAITS_FOR_STDIN);
+        let repo = root.join("repo");
+        GitRepo::init(&repo).unwrap();
+        let switch = |branch: &str| {
+            Command::new("git").current_dir(&repo).args(["checkout", "-q", "-b", branch]).output().unwrap();
+        };
+        switch("main");
+        let run = orch.start("Add a logout button", Some(&repo)).unwrap();
+        let pending = |orch: &Orchestrator| orch.approvals().into_iter().map(|a| a.request.request_id).collect::<Vec<_>>();
+
+        set(&mut orch, |s| {
+            s.full_autonomy = true;
+            s.agent_push = GitRule::Never;
+        });
+        ask_command(&orch, &run.id, "push", "git add . && git push");
+        ask_command(&orch, &run.id, "commit on main", "git commit -m wip");
+        ask_command(&orch, &run.id, "tests", "npm test");
+        orch.poll();
+        assert_eq!(orch.runs()[0].auto_denied, 1, "never beats full autonomy");
+        assert_eq!(pending(&orch), ["commit on main"], "a protected branch always asks");
+        assert_eq!(orch.runs()[0].auto_allowed, 1, "other commands follow full autonomy");
+
+        switch("feature");
+        set(&mut orch, |s| {
+            s.full_autonomy = false;
+            s.agent_commit = GitRule::Allow;
+        });
+        ask_command(&orch, &run.id, "commit on feature", "git commit -m wip");
+        ask_command(&orch, &run.id, "push on feature", "git push");
+        orch.poll();
+        assert_eq!(orch.runs()[0].auto_allowed, 2);
+        assert_eq!(orch.runs()[0].auto_denied, 2);
+        assert_eq!(pending(&orch), ["commit on main"]);
+
+        orch.cancel(&run.id);
+        let _ = fs::remove_dir_all(root);
+    }
 }

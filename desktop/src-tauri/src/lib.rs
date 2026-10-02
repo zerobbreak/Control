@@ -4,8 +4,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use mission_control::{
-    Answer, Board, BoardSnapshot, ClaudeCode, Orchestrator, PendingApproval, RunSummary, RuntimeConfig, Settings,
-    TranscriptWatcher, WatcherConfig,
+    Answer, Board, BoardSnapshot, ClaudeCode, GitError, GitRepo, Orchestrator, PendingApproval, PullRequest, RepoStatus,
+    RunSummary, RuntimeConfig, Settings, TranscriptWatcher, WatcherConfig,
 };
 use tauri::{Emitter, LogicalSize, Manager, PhysicalPosition, WebviewWindow, WindowEvent};
 
@@ -49,6 +49,95 @@ fn update_settings(
     let saved = orchestrator.lock().unwrap().update_settings(settings).map_err(|e| e.to_string())?;
     let _ = app.emit("settings-updated", saved.clone());
     Ok(saved)
+}
+
+/// Runs a git operation in the repository containing `folder`, off the UI thread, since pushes
+/// and pulls wait on the network.
+async fn in_repo<T: Send + 'static>(
+    folder: PathBuf,
+    op: impl FnOnce(&GitRepo) -> Result<T, GitError> + Send + 'static,
+) -> Result<T, String> {
+    tauri::async_runtime::spawn_blocking(move || GitRepo::open(&folder).and_then(|repo| op(&repo)))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn git_status(folder: PathBuf) -> Result<RepoStatus, String> {
+    in_repo(folder, |repo| repo.status()).await
+}
+
+#[tauri::command]
+async fn git_init(folder: PathBuf) -> Result<RepoStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || GitRepo::init(&folder).and_then(|repo| repo.status()))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn git_diff(folder: PathBuf, path: String, staged: bool) -> Result<String, String> {
+    in_repo(folder, move |repo| repo.diff(&path, staged)).await
+}
+
+/// Stages `paths`, or everything when empty.
+#[tauri::command]
+async fn git_stage(folder: PathBuf, paths: Vec<String>) -> Result<(), String> {
+    in_repo(folder, move |repo| repo.stage(&paths)).await
+}
+
+/// Unstages `paths`, or everything when empty. The work in the files is kept.
+#[tauri::command]
+async fn git_unstage(folder: PathBuf, paths: Vec<String>) -> Result<(), String> {
+    in_repo(folder, move |repo| repo.unstage(&paths)).await
+}
+
+/// Commits what is staged and returns the new commit's short hash.
+#[tauri::command]
+async fn git_commit(folder: PathBuf, message: String) -> Result<String, String> {
+    in_repo(folder, move |repo| repo.commit(&message)).await
+}
+
+#[tauri::command]
+async fn git_push(folder: PathBuf) -> Result<(), String> {
+    in_repo(folder, |repo| repo.push()).await
+}
+
+#[tauri::command]
+async fn git_pull(folder: PathBuf) -> Result<(), String> {
+    in_repo(folder, |repo| repo.pull()).await
+}
+
+#[tauri::command]
+async fn git_fetch(folder: PathBuf) -> Result<(), String> {
+    in_repo(folder, |repo| repo.fetch()).await
+}
+
+#[tauri::command]
+async fn git_branches(folder: PathBuf) -> Result<Vec<String>, String> {
+    in_repo(folder, |repo| repo.branches()).await
+}
+
+#[tauri::command]
+async fn git_create_branch(folder: PathBuf, name: String) -> Result<(), String> {
+    in_repo(folder, move |repo| repo.create_branch(&name)).await
+}
+
+#[tauri::command]
+async fn git_switch_branch(folder: PathBuf, name: String) -> Result<(), String> {
+    in_repo(folder, move |repo| repo.switch_branch(&name)).await
+}
+
+#[tauri::command]
+async fn github_pull_request(folder: PathBuf) -> Result<Option<PullRequest>, String> {
+    in_repo(folder, |repo| repo.pull_request()).await
+}
+
+/// Opens a pull request for the current branch and returns its URL.
+#[tauri::command]
+async fn github_create_pull_request(folder: PathBuf, title: String, body: String, draft: bool) -> Result<String, String> {
+    in_repo(folder, move |repo| repo.create_pull_request(&title, &body, draft)).await
 }
 
 #[tauri::command]
@@ -179,6 +268,20 @@ pub fn run() {
             runs_snapshot,
             get_settings,
             update_settings,
+            git_status,
+            git_init,
+            git_diff,
+            git_stage,
+            git_unstage,
+            git_commit,
+            git_push,
+            git_pull,
+            git_fetch,
+            git_branches,
+            git_create_branch,
+            git_switch_branch,
+            github_pull_request,
+            github_create_pull_request,
             approvals_snapshot,
             answer_approval,
             set_pill_size,

@@ -1,12 +1,18 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { Settings, Tier } from "./types";
+import type { GitRule, Settings, Tier } from "./types";
 
 const TIERS: { tier: Tier; label: string; model: string }[] = [
   { tier: "fast", label: "Fast", model: "Haiku" },
   { tier: "balanced", label: "Balanced", model: "Sonnet" },
   { tier: "strongest", label: "Strongest", model: "Opus" },
+];
+
+const GIT_RULES: { rule: GitRule; label: string }[] = [
+  { rule: "ask", label: "Ask" },
+  { rule: "allow", label: "Allow" },
+  { rule: "never", label: "Never" },
 ];
 
 type SaveState = { kind: "idle" } | { kind: "saving" } | { kind: "saved" } | { kind: "error"; message: string };
@@ -125,6 +131,29 @@ export default function CommandCentre() {
         />
       </Section>
 
+      <Section title="Git and GitHub">
+        <Row
+          label="Agents committing"
+          description="Ask follows your other approval settings. Never refuses, even with full autonomy on. Your own commits from the Changes tab are not affected."
+        >
+          <GitRuleControl label="Agents committing" value={settings.agentCommit} onChange={(agentCommit) => update({ agentCommit })} />
+        </Row>
+        <Row
+          label="Agents pushing and opening pull requests"
+          description="Covers git push and creating or merging pull requests with gh. Work leaves your computer, so think before choosing Allow."
+        >
+          <GitRuleControl label="Agents pushing" value={settings.agentPush} onChange={(agentPush) => update({ agentPush })} />
+        </Row>
+        <ListEditor
+          label="Protected branches"
+          description="Agents' commits and pushes on these branches always wait for you, whatever the rules above or full autonomy say."
+          placeholder="main"
+          items={settings.protectedBranches}
+          onChange={(protectedBranches) => update({ protectedBranches })}
+          mono
+        />
+      </Section>
+
       <Section title="Power features" danger>
         <DangerToggle
           label="Full autonomy"
@@ -198,6 +227,18 @@ function DangerToggle(props: { label: string; description: string; checked: bool
         <Switch label={props.label} checked={props.checked} onChange={(on) => (on ? setConfirming(true) : props.onChange(false))} />
       )}
     </Row>
+  );
+}
+
+function GitRuleControl({ label, value, onChange }: { label: string; value: GitRule; onChange: (rule: GitRule) => void }) {
+  return (
+    <div className="segmented" role="radiogroup" aria-label={label}>
+      {GIT_RULES.map(({ rule, label }) => (
+        <button key={rule} role="radio" aria-checked={value === rule} className={value === rule ? "on" : ""} onClick={() => onChange(rule)}>
+          {label}
+        </button>
+      ))}
+    </div>
   );
 }
 

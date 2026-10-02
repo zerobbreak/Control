@@ -37,6 +37,24 @@ pub struct Settings {
 
     /// Folders runs may start in. Empty means anywhere. The scratch folder is always allowed.
     pub allowed_folders: Vec<PathBuf>,
+
+    /// Whether agents may commit on their own.
+    pub agent_commit: GitRule,
+    /// Whether agents may push, or create or merge pull requests, on their own.
+    pub agent_push: GitRule,
+    /// Agents' commits and pushes on these branches always ask, whatever the rules above say.
+    pub protected_branches: Vec<String>,
+}
+
+/// What agents may do with one kind of git action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum GitRule {
+    /// Ask, unless full autonomy or the always-allow list says otherwise.
+    Ask,
+    Allow,
+    /// Refused, even with full autonomy on.
+    Never,
 }
 
 impl Default for Settings {
@@ -51,6 +69,9 @@ impl Default for Settings {
             read_only_mode: false,
             full_autonomy: false,
             allowed_folders: Vec::new(),
+            agent_commit: GitRule::Ask,
+            agent_push: GitRule::Ask,
+            protected_branches: vec!["main".into(), "master".into()],
         }
     }
 }
@@ -86,6 +107,8 @@ impl Settings {
         self.auto_approve = self.auto_approve.iter().map(|c| c.trim().to_string()).filter(|c| !c.is_empty()).collect();
         self.allowed_folders.retain(|f| !f.as_os_str().is_empty());
         self.max_budget_usd = self.max_budget_usd.filter(|usd| usd.is_finite() && *usd > 0.0);
+        self.protected_branches =
+            self.protected_branches.iter().map(|b| b.trim().to_string()).filter(|b| !b.is_empty()).collect();
         self
     }
 

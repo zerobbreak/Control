@@ -97,4 +97,40 @@ export type Settings = {
   readOnlyMode: boolean;
   fullAutonomy: boolean;
   allowedFolders: string[];
+  agentCommit: GitRule;
+  agentPush: GitRule;
+  protectedBranches: string[];
+};
+
+/** What agents may do with one kind of git action. "ask" still follows full autonomy and the always-allow list. */
+export type GitRule = "ask" | "allow" | "never";
+
+// Mirrors backend/src/git.rs.
+
+export type ChangeKind = "added" | "modified" | "deleted" | "renamed" | "copied" | "typeChanged" | "untracked" | "conflicted";
+
+export type FileChange = {
+  path: string;
+  original: string | null;
+  staged: ChangeKind | null;
+  unstaged: ChangeKind | null;
+};
+
+export type RepoStatus = {
+  root: string;
+  branch: string | null;
+  upstream: string | null;
+  ahead: number;
+  behind: number;
+  unborn: boolean;
+  files: FileChange[];
+  remotes: string[];
+};
+
+export type PullRequest = {
+  number: number;
+  title: string;
+  url: string;
+  state: "OPEN" | "CLOSED" | "MERGED";
+  isDraft: boolean;
 };
