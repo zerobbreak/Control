@@ -92,6 +92,10 @@ body,
   cursor: default;
 }
 
+.pill.detailed {
+  min-width: 884px;
+}
+
 .pill-face {
   height: 100%;
   display: flex;
@@ -145,10 +149,18 @@ body,
   position: absolute;
   inset: 0;
   display: flex;
-  flex-direction: column;
+  gap: 16px;
   padding: 14px 16px 10px;
   opacity: 0;
   animation: fade-in 200ms ease 140ms forwards;
+}
+
+.panel-main {
+  display: flex;
+  flex-direction: column;
+  flex: none;
+  width: 370px;
+  min-height: 0;
 }
 
 .panel-head {
@@ -279,7 +291,7 @@ button {
 
 .panel-foot {
   display: flex;
-  justify-content: flex-end;
+  justify-content: space-between;
   padding-top: 6px;
 }
 
@@ -294,12 +306,150 @@ button {
   color: var(--text);
 }
 
+/* ---------- Details: one column per agent ---------- */
+
+.details {
+  flex: 1;
+  display: flex;
+  gap: 10px;
+  min-width: 0;
+  padding-left: 16px;
+  border-left: 1px solid var(--faint);
+  overflow-x: auto;
+  opacity: 0;
+  animation: fade-in 200ms ease 200ms forwards;
+}
+
+.details .empty {
+  margin: auto;
+  color: var(--muted);
+}
+
+.agent-col {
+  --accent: var(--idle);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  flex: 1 0 148px;
+  max-width: 220px;
+  padding: 12px;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.04);
+  border-top: 2px solid var(--accent);
+}
+
+.agent-col.thinking { --accent: var(--thinking); }
+.agent-col.working { --accent: var(--working); }
+.agent-col.needs { --accent: var(--needs-you); }
+.agent-col.done { --accent: var(--done); }
+
+.agent-col header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.agent-col header > div {
+  min-width: 0;
+}
+
+.agent-col .project {
+  display: block;
+  margin-left: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* A vertical tracker: dots joined by a line that fills in as the turn progresses. */
+.steps {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.steps li {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 26px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.steps li:not(:last-child)::after {
+  content: "";
+  position: absolute;
+  left: 4px;
+  top: 18px;
+  width: 2px;
+  height: 16px;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.steps li.done:not(:last-child)::after {
+  background: var(--accent);
+}
+
+.steps .dot {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.18);
+}
+
+.steps li.done .dot {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.steps li.current,
+.steps li.blocked {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.steps li.current .dot {
+  border-color: var(--accent);
+  animation: pulse 1.6s ease-in-out infinite;
+}
+
+.steps li.blocked .dot {
+  background: var(--needs-you);
+  border-color: var(--needs-you);
+}
+
+.agent-col .agent-activity {
+  flex: 1;
+  margin: 0;
+  -webkit-line-clamp: 4;
+}
+
+.agent-meta {
+  display: flex;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.agent-meta .errors {
+  color: #f87171;
+}
+
 /* ---------- Motion ---------- */
 
 @keyframes nudge {
   0%, 100% { transform: translateY(0); }
   8% { transform: translateY(2px); }
   16% { transform: translateY(0); }
+}
+
+@keyframes pulse {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 60%, transparent); }
+  50% { box-shadow: 0 0 0 4px transparent; }
 }
 
 @keyframes fade-in {

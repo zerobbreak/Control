@@ -46,3 +46,19 @@ export function pillCrew(sessions: SessionSummary[], max = 3): SessionSummary[] 
     .slice(0, max)
     .map(({ s }) => s);
 }
+
+export type StepStatus = "done" | "current" | "blocked" | "upcoming";
+export type ProgressStep = { label: string; status: StepStatus };
+
+/**
+ * Where a session is in its turn: Thinking → Working → Done.
+ * A stalled turn is stuck on the Working step until you step in, so that step reads "Needs you".
+ */
+export function progressSteps(state: AvatarState): ProgressStep[] {
+  const reached = { idle: -1, thinking: 0, working: 1, needs: 1, done: 3 }[state];
+  return ["Thinking", "Working", "Done"].map((label, i) => {
+    if (i < reached) return { label, status: "done" };
+    if (i > reached) return { label, status: "upcoming" };
+    return state === "needs" ? { label: "Needs you", status: "blocked" } : { label, status: "current" };
+  });
+}
