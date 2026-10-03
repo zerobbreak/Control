@@ -1,7 +1,10 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { GitRule, Settings, Tier } from "./types";
+import { BlobAvatar } from "./avatar/BlobAvatar";
+import type { AvatarRole } from "./avatar/blob";
+import { CAPABILITIES } from "./capabilities";
+import type { Capability, GitRule, Settings, Tier } from "./types";
 
 const TIERS: { tier: Tier; label: string; model: string }[] = [
   { tier: "fast", label: "Fast", model: "Haiku" },
@@ -21,7 +24,7 @@ type SaveState = { kind: "idle" } | { kind: "saving" } | { kind: "saved" } | { k
  * What Mission Control and its agents are allowed to do. Every switch here is enforced by the
  * Rust runtime; defaults are the cautious choice and riskier features are opt-in.
  */
-export default function CommandCentre() {
+export default function CommandCentre({ onViewAllSessions }: { onViewAllSessions: () => void }) {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [save, setSave] = useState<SaveState>({ kind: "idle" });
 
@@ -57,16 +60,20 @@ export default function CommandCentre() {
         <SaveStatus state={save} />
       </header>
 
+      <div className="cc-columns">
+        <div className="cc-column">
       <Section title="Agents">
         <Toggle
           label="Claude Code"
-          description="Let Mission Control start Claude Code on code and questions about your folders."
+          avatar="code"
+          description="Code and questions about your folders."
           checked={settings.claudeEnabled}
           onChange={(claudeEnabled) => update({ claudeEnabled })}
         />
         <Toggle
           label="Assistant"
-          description="Errands in your apps and files you drop on the pill, such as turning an assignment into a Notion page. It reads files and uses your claude.ai connectors, but never runs commands or changes files."
+          avatar="assist"
+          description="Errands in Notion, Gmail and the files you drop on the pill. Never runs commands or changes files."
           checked={settings.assistantEnabled}
           onChange={(assistantEnabled) => update({ assistantEnabled })}
         />
@@ -77,21 +84,6 @@ export default function CommandCentre() {
           onChange={(watchOtherSessions) => update({ watchOtherSessions })}
         />
       </Section>
-
-      <Section title="Assistant">
-        <Row
-          label="Where new Notion pages go"
-          description="A page name or link, used when a goal doesn't say. Leave empty and new pages start as private drafts."
-        >
-          <TextSetting
-            value={settings.notionParent}
-            placeholder="Uni Notes"
-            label="Where new Notion pages go"
-            onCommit={(notionParent) => update({ notionParent })}
-          />
-        </Row>
-      </Section>
-
       <Section title="Models and spending">
         <Row
           label="Strongest model allowed"
@@ -116,7 +108,6 @@ export default function CommandCentre() {
           <BudgetInput value={settings.maxBudgetUsd} onCommit={(maxBudgetUsd) => update({ maxBudgetUsd })} />
         </Row>
       </Section>
-
       <Section title="Approvals">
         <Toggle
           label="Ask before file edits"
@@ -139,18 +130,64 @@ export default function CommandCentre() {
           onChange={(readOnlyMode) => update({ readOnlyMode })}
         />
       </Section>
-
-      <Section title="Folders">
-        <ListEditor
-          label="Only run in these folders"
-          description="Empty means runs may start in any folder. Mission Control's scratch folder is always allowed."
-          placeholder="C:\dev"
-          items={settings.allowedFolders}
-          onChange={(allowedFolders) => update({ allowedFolders })}
-          mono
+      <Section title="Sessions">
+        <Row label="All sessions" description="Older and idle sessions too. The pill shows live work and recent completions.">
+          <button className="cc-action" onClick={onViewAllSessions}>View all sessions</button>
+        </Row>
+      </Section>
+        </div>
+        <div className="cc-column">
+      <Section title="Assistant">
+        <Row
+          label="Where new Notion pages go"
+          description="A page name or link, used when a goal doesn't say. Leave empty and new pages start as private drafts."
+        >
+          <TextSetting
+            value={settings.notionParent}
+            placeholder="Uni Notes"
+            label="Where new Notion pages go"
+            onCommit={(notionParent) => update({ notionParent })}
+          />
+        </Row>
+        <Toggle
+          label="Reads in apps without asking"
+          description="Search and open in Notion and Gmail. Creating, changing or sending always asks."
+          checked={settings.readAppsFreely}
+          onChange={(readAppsFreely) => update({ readAppsFreely })}
         />
       </Section>
-
+      <Section title="Permissions">
+        {(Object.keys(CAPABILITIES) as Capability[]).map((capability) => {
+          const copy = CAPABILITIES[capability];
+          const answer = settings.capabilities[capability];
+          return (
+            <Row key={capability} label={copy.name} description={`${copy.does[0]}. Never ${copy.never[0].charAt(0).toLowerCase() + copy.never[0].slice(1)}.`}>
+              <div className="segmented" role="radiogroup" aria-label={copy.name}>
+                {[
+                  { value: undefined, label: "Ask me" },
+                  { value: true, label: "Allow" },
+                  { value: false, label: "Don't allow" },
+                ].map(({ value, label }) => (
+                  <button
+                    key={label}
+                    role="radio"
+                    aria-checked={answer === value}
+                    className={answer === value ? "on" : ""}
+                    onClick={() => {
+                      const capabilities = { ...settings.capabilities };
+                      if (value === undefined) delete capabilities[capability];
+                      else capabilities[capability] = value;
+                      update({ capabilities });
+                    }}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </Row>
+          );
+        })}
+      </Section>
       <Section title="Git and GitHub">
         <Row
           label="Agents committing"
@@ -173,7 +210,16 @@ export default function CommandCentre() {
           mono
         />
       </Section>
-
+      <Section title="Folders">
+        <ListEditor
+          label="Only run in these folders"
+          description="Empty means runs may start in any folder. Mission Control's scratch folder is always allowed."
+          placeholder="C:\dev"
+          items={settings.allowedFolders}
+          onChange={(allowedFolders) => update({ allowedFolders })}
+          mono
+        />
+      </Section>
       <Section title="Power features" danger>
         <DangerToggle
           label="Full autonomy"
@@ -182,6 +228,8 @@ export default function CommandCentre() {
           onChange={(fullAutonomy) => update({ fullAutonomy })}
         />
       </Section>
+        </div>
+      </div>
     </div>
   );
 }
@@ -195,11 +243,14 @@ function Section({ title, danger, children }: { title: string; danger?: boolean;
   );
 }
 
-function Row({ label, description, children }: { label: string; description: string; children: ReactNode }) {
+function Row({ label, description, avatar, children }: { label: string; description: string; avatar?: AvatarRole; children: ReactNode }) {
   return (
     <div className="cc-row">
       <div className="cc-text">
-        <div className="cc-label">{label}</div>
+        <div className="cc-label">
+          {avatar && <BlobAvatar role={avatar} state="idle" size={18} />}
+          {label}
+        </div>
         <p>{description}</p>
       </div>
       <div className="cc-control">{children}</div>
@@ -215,9 +266,9 @@ function Switch({ label, checked, onChange }: { label: string; checked: boolean;
   );
 }
 
-function Toggle(props: { label: string; description: string; checked: boolean; onChange: (on: boolean) => void }) {
+function Toggle(props: { label: string; description: string; avatar?: AvatarRole; checked: boolean; onChange: (on: boolean) => void }) {
   return (
-    <Row label={props.label} description={props.description}>
+    <Row label={props.label} description={props.description} avatar={props.avatar}>
       <Switch label={props.label} checked={props.checked} onChange={props.onChange} />
     </Row>
   );

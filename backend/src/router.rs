@@ -55,6 +55,8 @@ pub struct Context {
     pub folder: bool,
     /// The user handed over files with the goal, such as a dropped PDF.
     pub attachments: bool,
+    /// One of them is a folder that is not a code project, such as Downloads.
+    pub loose_folder: bool,
 }
 
 /// "Open YouTube…" is a browser task; "fix the login and test it in the browser" is code work.
@@ -77,16 +79,28 @@ pub fn route(goal: &str, context: Context) -> Decision {
         return Decision {
             task: TaskKind::Browse,
             tier: Tier::Fast,
+            // The browser agent acts only in Chrome; it never touches files or runs commands.
             access: Access::ReadOnly,
-            reason: "A browser action.".into(),
+            reason: "A quick browser action in Chrome. No code or files, so a fast model is enough.".into(),
         };
     }
     // In a project folder, "add Notion sync" is code work; outside one it is an errand in Notion.
     let mentions_app = has(&APPS);
+    if !context.folder && context.loose_folder && !mentions_app {
+        return Decision {
+            task: TaskKind::Assistant,
+            tier: Tier::Fast,
+            access: Access::ReadOnly,
+            reason: "A folder that isn't a project, so a quick read-only look: Mission Control scans it and nothing is changed."
+                .into(),
+        };
+    }
     if !context.folder && (mentions_app || context.attachments) {
         return Decision {
             task: TaskKind::Assistant,
-            tier: if question && !mentions_app { Tier::Fast } else { Tier::Balanced },
+            // Never the fast model: it cannot load connected apps' tools on demand, and with
+            // every connector's tools up front its context overflows before it reads a thing.
+            tier: Tier::Balanced,
             access: Access::UseApps,
             reason: if mentions_app {
                 "Work in your apps, so the assistant: it reads what you give it and asks before creating or sending anything."
@@ -122,8 +136,20 @@ mod tests {
         super::route(goal, Context::default())
     }
 
-    const IN_PROJECT: Context = Context { folder: true, attachments: false };
-    const WITH_FILES: Context = Context { folder: false, attachments: true };
+    const IN_PROJECT: Context = Context { folder: true, attachments: false, loose_folder: false };
+    const WITH_FILES: Context = Context { folder: false, attachments: true, loose_folder: false };
+    const WITH_FOLDER: Context = Context { folder: false, attachments: true, loose_folder: true };
+
+    #[test]
+    fn a_loose_folder_gets_a_quick_read_only_look() {
+        let d = super::route("What's taking up the most space, and is there anything I can delete?", WITH_FOLDER);
+        assert_eq!((d.task, d.tier, d.access), (TaskKind::Assistant, Tier::Fast, Access::ReadOnly));
+        assert_eq!(
+            super::route("Save a summary of this folder to Notion", WITH_FOLDER).access,
+            Access::UseApps,
+            "naming an app still means app work"
+        );
+    }
 
     #[test]
     fn errands_in_apps_and_dropped_files_go_to_the_assistant() {
@@ -131,7 +157,7 @@ mod tests {
         assert_eq!((d.task, d.tier, d.access), (TaskKind::Assistant, Tier::Balanced, Access::UseApps));
         assert_eq!(route("Email the summary to my lecturer").task, TaskKind::Assistant);
         assert_eq!(super::route("Summarise this", WITH_FILES).task, TaskKind::Assistant);
-        assert_eq!(super::route("What is due first?", WITH_FILES).tier, Tier::Fast);
+        assert_eq!(super::route("What is due first?", WITH_FILES).tier, Tier::Balanced, "app work never gets the fast model");
     }
 
     #[test]
@@ -156,7 +182,8 @@ mod tests {
 
     #[test]
     fn browser_actions_are_recognised() {
-        assert_eq!(route("Open YouTube and play lofi beats").task, TaskKind::Browse);
+        let d = route("Open YouTube and play lofi beats");
+        assert_eq!((d.task, d.tier, d.access), (TaskKind::Browse, Tier::Fast, Access::ReadOnly));
         assert_eq!(route("Go to github.com and star the repo").task, TaskKind::Browse);
         assert_eq!(route("Fix the login and test it in the browser").task, TaskKind::Code);
         assert_eq!(route("Add a display name field").task, TaskKind::Code);

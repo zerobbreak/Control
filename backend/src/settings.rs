@@ -3,12 +3,14 @@
 //! Defaults are the cautious choice; anything riskier is something the user turns on. Every
 //! setting here is enforced by the runtime, not just shown in the UI.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::apps::AppAccess;
 use crate::router::{TaskKind, Tier};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -20,6 +22,9 @@ pub struct Settings {
     pub assistant_enabled: bool,
     /// Where new Notion pages go when a goal does not say, such as a page name or link.
     pub notion_parent: Option<String>,
+    /// Searching and opening in connected apps runs without asking. Creating, changing or
+    /// sending always asks (unless an app is set to act on its own).
+    pub read_apps_freely: bool,
     /// Whether Mission Control reads transcripts of Claude Code and Gemini CLI sessions it did
     /// not start. Off, only its own runs are watched.
     pub watch_other_sessions: bool,
@@ -47,6 +52,26 @@ pub struct Settings {
     pub agent_push: GitRule,
     /// Agents' commits and pushes on these branches always ask, whatever the rules above say.
     pub protected_branches: Vec<String>,
+
+    /// How much agents may do in each connected app, keyed by the app's tool-name id such as
+    /// "claude_ai_Notion". Apps not listed are "ask".
+    pub app_access: BTreeMap<String, AppAccess>,
+
+    /// The user's answer for each capability that acts on the computer. Missing means not asked
+    /// yet: Mission Control asks the first time a capability is needed.
+    pub capabilities: BTreeMap<Capability, bool>,
+}
+
+/// Things Mission Control can do on the computer that the user must allow first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Capability {
+    /// A browser agent drives Chrome: opens tabs, clicks and types on pages.
+    BrowserControl,
+    /// Files an agent suggests removing can be moved to the Recycle Bin, one confirmed batch at a time.
+    RecycleFiles,
+    /// See what is playing and pause, skip or change the volume.
+    MediaControls,
 }
 
 /// What agents may do with one kind of git action.
@@ -66,6 +91,7 @@ impl Default for Settings {
             claude_enabled: true,
             assistant_enabled: true,
             notion_parent: None,
+            read_apps_freely: true,
             watch_other_sessions: true,
             max_tier: Tier::Strongest,
             max_budget_usd: None,
@@ -77,6 +103,8 @@ impl Default for Settings {
             agent_commit: GitRule::Ask,
             agent_push: GitRule::Ask,
             protected_branches: vec!["main".into(), "master".into()],
+            app_access: BTreeMap::new(),
+            capabilities: BTreeMap::new(),
         }
     }
 }
@@ -123,7 +151,7 @@ impl Settings {
         match task {
             TaskKind::Code | TaskKind::Question => self.claude_enabled,
             TaskKind::Assistant => self.assistant_enabled,
-            TaskKind::Browse => false,
+            TaskKind::Browse => self.capability(Capability::BrowserControl) != Some(false),
         }
     }
 
@@ -139,6 +167,16 @@ impl Settings {
     }
 
     /// Whether a run may start in `folder`.
+    /// The user's answer for a capability: allowed, not allowed, or `None` if not asked yet.
+    pub fn capability(&self, capability: Capability) -> Option<bool> {
+        self.capabilities.get(&capability).copied()
+    }
+
+    /// How much agents may do in the app with this tool-name id.
+    pub fn app_access(&self, app: &str) -> AppAccess {
+        self.app_access.get(app).copied().unwrap_or_default()
+    }
+
     pub fn allows_folder(&self, folder: &Path) -> bool {
         if self.allowed_folders.is_empty() {
             return true;

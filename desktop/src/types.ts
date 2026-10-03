@@ -69,6 +69,10 @@ export type RunSummary = {
   startedAt: string;
   endedAt: string | null;
   logPath: string;
+  /** The files and folders handed over with the goal. */
+  attachments: string[];
+  /** How the agent's app connections went while it started; empty for agents without apps. */
+  connections: { name: string; status: string }[];
   /** The agent's final answer, in full, once it has finished. */
   result: string | null;
   /** Requests the Command Centre's rules answered without asking. */
@@ -97,6 +101,8 @@ export type Settings = {
   assistantEnabled: boolean;
   /** Where new Notion pages go when a goal does not say. */
   notionParent: string | null;
+  /** Searching and opening in connected apps runs without asking. */
+  readAppsFreely: boolean;
   watchOtherSessions: boolean;
   maxTier: Tier;
   maxBudgetUsd: number | null;
@@ -108,7 +114,14 @@ export type Settings = {
   agentCommit: GitRule;
   agentPush: GitRule;
   protectedBranches: string[];
+  /** How much agents may do in each app, keyed by its tool-name id such as "claude_ai_Notion". */
+  appAccess: Record<string, AppAccess>;
+  /** The user's answer for each capability; missing means not asked yet. */
+  capabilities: Partial<Record<Capability, boolean>>;
 };
+
+/** Things Mission Control can do on the computer that the user must allow first. Mirrors backend/src/settings.rs. */
+export type Capability = "browserControl" | "recycleFiles" | "mediaControls";
 
 /** What agents may do with one kind of git action. "ask" still follows full autonomy and the always-allow list. */
 export type GitRule = "ask" | "allow" | "never";
@@ -142,3 +155,53 @@ export type PullRequest = {
   state: "OPEN" | "CLOSED" | "MERGED";
   isDraft: boolean;
 };
+
+// Mirrors backend/src/apps.rs.
+
+/** Read: look only. Ask: you approve each change. Act: changes go ahead on their own. */
+export type AppAccess = "read" | "ask" | "act";
+export type AppStatus = "connected" | "needsAuth" | "failed";
+
+export type App = {
+  /** As a person would name it, e.g. "Notion". */
+  name: string;
+  /** The server part of its tool names, e.g. "claude_ai_Notion". */
+  id: string;
+  status: AppStatus;
+};
+
+// Mirrors backend/src/context.rs.
+
+/** "link" is a Windows internet shortcut: it points somewhere, such as a Google Drive file. */
+export type ContextKind = "folder" | "image" | "pdf" | "link" | "file" | "missing";
+
+/** A file or folder handed over with a goal. */
+export type ContextItem = {
+  path: string;
+  name: string;
+  kind: ContextKind;
+  /** A folder's git branch, or a file's type and size. */
+  detail: string;
+  /** A folder that is a code project, so a goal can run in it. Loose folders are only looked at. */
+  project: boolean;
+};
+
+// Mirrors Preview in backend/src/orchestrator.rs.
+
+/** What a goal would start, shown for review before it does. */
+export type Preview = {
+  decision: Decision;
+  workdir: string;
+  model: string;
+  askBeforeEdits: boolean;
+  fullAutonomy: boolean;
+  /** A capability the run needs the user's permission for. */
+  capability: Capability | null;
+  /** The answer so far: allowed, not allowed, or null if not asked yet. */
+  capabilityGranted: boolean | null;
+};
+
+// Mirrors backend/src/media.rs.
+
+export type NowPlaying = { title: string; artist: string | null; app: string; playing: boolean };
+export type MediaAction = "playPause" | "next" | "previous" | "volumeUp" | "volumeDown" | "mute";

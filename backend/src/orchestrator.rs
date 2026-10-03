@@ -16,11 +16,12 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
-use crate::agent::{Agent, Answer, ApprovalRequest, HostMessage, Launch};
+use crate::agent::{connections_settled, Agent, AppConnection, Answer, ApprovalRequest, HostMessage, Launch};
+use crate::apps::{self, AppAccess};
 use crate::events::AgentKind;
-use crate::router::{self, Access, Decision, Tier};
+use crate::router::{self, Access, Decision, TaskKind, Tier};
 use crate::git::{self, GitAction, GitRepo};
-use crate::settings::{GitRule, Settings};
+use crate::settings::{Capability, GitRule, Settings};
 
 pub struct RuntimeConfig {
     /// One log file per run, holding everything the agent wrote.
@@ -72,6 +73,10 @@ pub struct RunSummary {
     pub started_at: DateTime<Utc>,
     pub ended_at: Option<DateTime<Utc>>,
     pub log_path: String,
+    /// The files and folders the user handed over with the goal.
+    pub attachments: Vec<String>,
+    /// How the agent's app connections went while it started; empty for agents without apps.
+    pub connections: Vec<AppConnection>,
     /// The agent's final answer, in full, once it has finished the goal.
     pub result: Option<String>,
     /// Requests the Command Centre's rules answered without asking.
@@ -102,6 +107,10 @@ pub enum StartError {
     FolderNotAllowed(PathBuf),
     /// No registered agent can do this kind of task yet.
     NoAgent(Decision),
+    /// The task needs a capability the user has not been asked about yet.
+    NeedsPermission(Capability),
+    /// The task needs a capability the user said no to.
+    NotAllowed(Capability),
     Spawn(std::io::Error),
 }
 
@@ -115,6 +124,8 @@ impl std::fmt::Display for StartError {
                 write!(f, "the Command Centre does not allow runs in {}", path.display())
             }
             Self::NoAgent(d) => write!(f, "no enabled agent can handle {:?} tasks", d.task),
+            Self::NeedsPermission(c) => write!(f, "{} needs your permission first", capability_name(*c)),
+            Self::NotAllowed(c) => write!(f, "{} is turned off in the Command Centre", capability_name(*c)),
             Self::Spawn(err) => write!(f, "could not start the agent: {err}"),
         }
     }
@@ -125,6 +136,8 @@ impl std::error::Error for StartError {}
 /// What a read-only run is told when it asks for anything beyond reading.
 const READ_ONLY_REFUSAL: &str =
     "This run is read-only: Mission Control started it to answer a question, not to change anything.";
+const APP_READ_ONLY_REFUSAL: &str =
+    "The user lets agents only read this app; Mission Control's Apps & access keeps it to looking. Say what you would have changed instead.";
 const LOCKDOWN_REASON: &str = " Read-only, because read-only mode is on in the Command Centre.";
 /// How long a run waits for its app connections before starting without the slow ones.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
@@ -140,6 +153,68 @@ struct Run {
     started: Instant,
     /// A readiness probe is out and has not been answered yet.
     probing: bool,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum RecycleError {
+    NeedsPermission,
+    NotAllowed,
+    UnknownRun,
+    Empty,
+    /// Not a file inside a folder handed to the run.
+    Outside(PathBuf),
+    Failed(String),
+}
+
+impl std::fmt::Display for RecycleError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NeedsPermission => write!(f, "recycling files needs your permission first"),
+            Self::NotAllowed => write!(f, "recycling files is turned off in the Command Centre"),
+            Self::UnknownRun => write!(f, "that run is no longer known"),
+            Self::Empty => write!(f, "no files to recycle"),
+            Self::Outside(p) => write!(f, "{} is not a file in a folder you handed over", p.display()),
+            Self::Failed(e) => write!(f, "could not move the files to the Recycle Bin: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for RecycleError {}
+
+/// Every path must be an existing file inside one of `roots`, compared after resolving `..` and
+/// links so a suggestion cannot reach outside. Returns their total size.
+fn check_recyclable(roots: &[PathBuf], paths: &[PathBuf]) -> Result<u64, RecycleError> {
+    if paths.is_empty() {
+        return Err(RecycleError::Empty);
+    }
+    let roots: Vec<PathBuf> = roots.iter().filter_map(|r| r.canonicalize().ok()).collect();
+    let mut bytes = 0;
+    for path in paths {
+        let real = path.canonicalize().map_err(|_| RecycleError::Outside(path.clone()))?;
+        let meta = fs::metadata(&real).map_err(|_| RecycleError::Outside(path.clone()))?;
+        if !meta.is_file() || !roots.iter().any(|root| real.starts_with(root) && real != *root) {
+            return Err(RecycleError::Outside(path.clone()));
+        }
+        bytes += meta.len();
+    }
+    Ok(bytes)
+}
+
+/// What a goal would start, for the user to review before it does.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Preview {
+    pub decision: Decision,
+    pub workdir: String,
+    pub model: String,
+    /// Whether code runs would ask before each edit.
+    pub ask_before_edits: bool,
+    /// Whether every request would be allowed without asking.
+    pub full_autonomy: bool,
+    /// A capability the run needs the user's permission for, such as browser control.
+    pub capability: Option<Capability>,
+    /// The user's answer for it so far: allowed, not allowed, or not asked yet.
+    pub capability_granted: Option<bool>,
 }
 
 pub struct Orchestrator {
@@ -178,9 +253,24 @@ impl Orchestrator {
         self.runs.iter().any(|r| r.summary.id == session_id)
     }
 
-    /// Routes `goal`, starts an agent on it in `folder` (or the scratch folder) with any
-    /// `attachments` the user handed over, and returns the run.
-    pub fn start(&mut self, goal: &str, folder: Option<&Path>, attachments: &[PathBuf]) -> Result<RunSummary, StartError> {
+    /// What starting `goal` would do, without starting anything: which agent, where, with what
+    /// access and why. Fails for the same reasons `start` would.
+    pub fn preview(&self, goal: &str, folder: Option<&Path>, attachments: &[PathBuf]) -> Result<Preview, StartError> {
+        let (workdir, decision, agent) = self.plan(goal, folder, attachments)?;
+        Ok(Preview {
+            model: agent.model(decision.tier).to_string(),
+            decision,
+            workdir: workdir.display().to_string(),
+            ask_before_edits: self.settings.ask_before_edits,
+            full_autonomy: self.settings.full_autonomy,
+            capability: needed_capability(decision_task(&self.settings, goal, folder, attachments)),
+            capability_granted: needed_capability(decision_task(&self.settings, goal, folder, attachments))
+                .and_then(|c| self.settings.capability(c)),
+        })
+    }
+
+    /// Checks a goal and routes it: the folder it will run in, the decision and the agent.
+    fn plan(&self, goal: &str, folder: Option<&Path>, attachments: &[PathBuf]) -> Result<(PathBuf, Decision, Arc<dyn Agent>), StartError> {
         let goal = goal.trim();
         if goal.is_empty() {
             return Err(StartError::EmptyGoal);
@@ -194,20 +284,38 @@ impl Orchestrator {
                 return Err(StartError::FolderNotAllowed(dir.to_path_buf()));
             }
             Some(dir) => dir.to_path_buf(),
-            None => {
-                fs::create_dir_all(&self.config.scratch_dir).map_err(StartError::Spawn)?;
-                self.config.scratch_dir.clone()
-            }
+            None => self.config.scratch_dir.clone(),
         };
 
-        let context = router::Context { folder: folder.is_some(), attachments: !attachments.is_empty() };
-        let decision = bounded(router::route(goal, context), &self.settings);
+        let decision = bounded(router::route(goal, route_context(folder, attachments)), &self.settings);
+        if let Some(capability) = needed_capability(Some(decision.task)) {
+            if self.settings.capability(capability) == Some(false) {
+                return Err(StartError::NotAllowed(capability));
+            }
+        }
         if !self.settings.allows_task(decision.task) {
             return Err(StartError::NoAgent(decision));
         }
         let Some(agent) = self.agents.iter().find(|a| a.handles(decision.task)).cloned() else {
             return Err(StartError::NoAgent(decision));
         };
+        Ok((workdir, decision, agent))
+    }
+
+    /// Routes `goal`, starts an agent on it in `folder` (or the scratch folder) with any
+    /// `attachments` the user handed over, and returns the run.
+    pub fn start(&mut self, goal: &str, folder: Option<&Path>, attachments: &[PathBuf]) -> Result<RunSummary, StartError> {
+        let (workdir, decision, agent) = self.plan(goal, folder, attachments)?;
+        // Asking is the pill's job; the runtime only checks the answer.
+        if let Some(capability) = needed_capability(Some(decision.task)) {
+            if self.settings.capability(capability) != Some(true) {
+                return Err(StartError::NeedsPermission(capability));
+            }
+        }
+        let goal = goal.trim();
+        if folder.is_none() {
+            fs::create_dir_all(&workdir).map_err(StartError::Spawn)?;
+        }
 
         let id = uuid::Uuid::new_v4().to_string();
         let launch = Launch {
@@ -220,6 +328,7 @@ impl Orchestrator {
             ask_before_edits: self.settings.ask_before_edits,
             max_budget_usd: self.settings.max_budget_usd,
             notion_parent: self.settings.notion_parent.as_deref(),
+            read_apps_freely: self.settings.read_apps_freely,
         };
         fs::create_dir_all(&self.config.runs_dir).map_err(StartError::Spawn)?;
         let log_path = self.config.runs_dir.join(format!("{id}.log"));
@@ -252,6 +361,8 @@ impl Orchestrator {
             started_at: Utc::now(),
             ended_at: None,
             log_path: log_path.display().to_string(),
+            attachments: attachments.iter().map(|a| a.display().to_string()).collect(),
+            connections: Vec::new(),
             result: None,
             auto_allowed: 0,
             auto_denied: 0,
@@ -313,8 +424,15 @@ impl Orchestrator {
                     run.summary.result = result;
                     run.stdin = None;
                 }
-                HostMessage::Ready(true) => release_goal(run),
-                HostMessage::Ready(false) => run.probing = false,
+                HostMessage::Ready(apps) => {
+                    let settled = connections_settled(&apps);
+                    run.summary.connections = apps;
+                    if settled {
+                        release_goal(run);
+                    } else {
+                        run.probing = false;
+                    }
+                }
                 HostMessage::Approval(request) => {
                     let workdir = Path::new(&run.summary.workdir);
                     if let Some(answer) = auto_answer(&self.settings, run.summary.decision.access, &request, workdir) {
@@ -373,6 +491,22 @@ impl Orchestrator {
         self.pending.retain(|p| live.contains(&p.run_id.as_str()));
     }
 
+    /// Moves files an agent suggested removing to the Recycle Bin, where the user can restore
+    /// them. Only files inside a folder the user handed to that run are accepted, and only once
+    /// the user has allowed recycling. Returns how many bytes were moved.
+    pub fn recycle(&self, run_id: &str, paths: &[PathBuf]) -> Result<u64, RecycleError> {
+        match self.settings.capability(Capability::RecycleFiles) {
+            None => return Err(RecycleError::NeedsPermission),
+            Some(false) => return Err(RecycleError::NotAllowed),
+            Some(true) => {}
+        }
+        let run = self.runs.iter().find(|r| r.summary.id == run_id).ok_or(RecycleError::UnknownRun)?;
+        let roots: Vec<PathBuf> = run.summary.attachments.iter().map(PathBuf::from).filter(|p| p.is_dir()).collect();
+        let bytes = check_recyclable(&roots, paths)?;
+        trash::delete_all(paths).map_err(|e| RecycleError::Failed(e.to_string()))?;
+        Ok(bytes)
+    }
+
     /// Every run this session, newest first.
     pub fn runs(&self) -> Vec<RunSummary> {
         self.runs.iter().rev().map(|r| r.summary.clone()).collect()
@@ -405,6 +539,9 @@ fn bounded(mut decision: Decision, settings: &Settings) -> Decision {
             Tier::Strongest => "strongest",
         };
         decision.reason.push_str(&format!(" Capped at the {name} model in the Command Centre."));
+        if decision.task == TaskKind::Assistant && decision.tier == Tier::Fast {
+            decision.reason.push_str(" The fast model can't hold your connected apps, so it works from the files only.");
+        }
     }
     if settings.read_only_mode && decision.access != Access::ReadOnly {
         decision.access = Access::ReadOnly;
@@ -413,14 +550,50 @@ fn bounded(mut decision: Decision, settings: &Settings) -> Decision {
     decision
 }
 
+/// What the router sees in what came with a goal.
+fn route_context(folder: Option<&Path>, attachments: &[PathBuf]) -> router::Context {
+    router::Context {
+        folder: folder.is_some(),
+        attachments: !attachments.is_empty(),
+        loose_folder: attachments.iter().any(|a| a.is_dir() && !crate::context::is_project(a)),
+    }
+}
+
+/// The task a goal routes to, for previews.
+fn decision_task(settings: &Settings, goal: &str, folder: Option<&Path>, attachments: &[PathBuf]) -> Option<TaskKind> {
+    Some(bounded(router::route(goal.trim(), route_context(folder, attachments)), settings).task)
+}
+
+/// The capability a kind of task needs the user's permission for.
+fn needed_capability(task: Option<TaskKind>) -> Option<Capability> {
+    (task? == TaskKind::Browse).then_some(Capability::BrowserControl)
+}
+
+pub fn capability_name(capability: Capability) -> &'static str {
+    match capability {
+        Capability::BrowserControl => "Browser control",
+        Capability::RecycleFiles => "Recycling files",
+        Capability::MediaControls => "Media controls",
+    }
+}
+
 /// The answer the Command Centre's rules give a request without asking, if any.
 ///
 /// A run's read-only access is Mission Control's promise to the user, so it is enforced here
 /// rather than trusted to the agent's own permission mode, and it outranks everything else.
-/// Git rules come next: "never" and protected branches outrank full autonomy.
+/// Each app's access comes next, then git rules: "never" and protected branches outrank full
+/// autonomy.
 fn auto_answer(settings: &Settings, access: Access, request: &ApprovalRequest, workdir: &Path) -> Option<Answer> {
     if access == Access::ReadOnly {
         return Some(Answer::Deny(READ_ONLY_REFUSAL.into()));
+    }
+    // Reading tools never ask, so a request in an app is always a change.
+    if let Some(app) = apps::app_of_tool(&request.tool) {
+        match settings.app_access(app) {
+            AppAccess::Read => return Some(Answer::Deny(APP_READ_ONLY_REFUSAL.into())),
+            AppAccess::Act => return Some(Answer::Allow),
+            AppAccess::Ask => {}
+        }
     }
     if let Some(action) = request.input["command"].as_str().and_then(git::classify) {
         let (rule, what) = match action {
@@ -518,8 +691,8 @@ mod tests {
         fn kind(&self) -> AgentKind {
             AgentKind::Claude
         }
-        fn handles(&self, task: TaskKind) -> bool {
-            task != TaskKind::Browse
+        fn handles(&self, _task: TaskKind) -> bool {
+            true
         }
         fn model(&self, _tier: Tier) -> &'static str {
             "fake"
@@ -646,9 +819,76 @@ mod tests {
     }
 
     #[test]
+    fn browser_control_starts_only_once_the_user_allows_it() {
+        let (mut orch, root) = orchestrator(WAITS_FOR_STDIN);
+        let goal = "Open YouTube and play lofi";
+
+        let preview = orch.preview(goal, None, &[]).unwrap();
+        assert_eq!((preview.capability, preview.capability_granted), (Some(Capability::BrowserControl), None));
+        assert!(matches!(orch.start(goal, None, &[]), Err(StartError::NeedsPermission(Capability::BrowserControl))));
+
+        set(&mut orch, |s| {
+            s.capabilities.insert(Capability::BrowserControl, false);
+        });
+        assert!(matches!(orch.start(goal, None, &[]), Err(StartError::NotAllowed(Capability::BrowserControl))));
+
+        set(&mut orch, |s| {
+            s.capabilities.insert(Capability::BrowserControl, true);
+        });
+        assert_eq!(orch.preview(goal, None, &[]).unwrap().capability_granted, Some(true));
+        let run = orch.start(goal, None, &[]).unwrap();
+        assert_eq!(run.decision.task, TaskKind::Browse);
+        assert!(orch.preview("Add a button", None, &[]).unwrap().capability.is_none(), "code work needs no extra permission");
+        orch.cancel(&run.id);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn only_files_inside_handed_over_folders_can_be_recycled() {
+        let root = std::env::temp_dir().join(format!("mc-recycle-{}", uuid::Uuid::new_v4()));
+        let downloads = root.join("Downloads");
+        fs::create_dir_all(downloads.join("sub")).unwrap();
+        fs::write(downloads.join("a.iso"), vec![0u8; 10]).unwrap();
+        fs::write(downloads.join("sub").join("b.msi"), vec![0u8; 5]).unwrap();
+        fs::write(root.join("elsewhere.txt"), b"keep").unwrap();
+        let roots = [downloads.clone()];
+
+        assert_eq!(check_recyclable(&roots, &[downloads.join("a.iso"), downloads.join("sub").join("b.msi")]), Ok(15));
+        assert!(matches!(check_recyclable(&roots, &[root.join("elsewhere.txt")]), Err(RecycleError::Outside(_))));
+        assert!(
+            matches!(check_recyclable(&roots, &[downloads.join("..").join("elsewhere.txt")]), Err(RecycleError::Outside(_))),
+            "no climbing out with .."
+        );
+        assert!(matches!(check_recyclable(&roots, &[downloads.join("sub")]), Err(RecycleError::Outside(_))), "files only");
+        assert!(matches!(check_recyclable(&roots, &[downloads.join("gone.iso")]), Err(RecycleError::Outside(_))));
+        assert_eq!(check_recyclable(&roots, &[]), Err(RecycleError::Empty));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn recycling_waits_for_the_users_permission() {
+        let (mut orch, root) = orchestrator(&["--version"]);
+        let file = root.join("x.iso");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(&file, b"x").unwrap();
+        assert_eq!(orch.recycle("nope", &[file.clone()]), Err(RecycleError::NeedsPermission));
+        set(&mut orch, |s| {
+            s.capabilities.insert(Capability::RecycleFiles, false);
+        });
+        assert_eq!(orch.recycle("nope", &[file.clone()]), Err(RecycleError::NotAllowed));
+        set(&mut orch, |s| {
+            s.capabilities.insert(Capability::RecycleFiles, true);
+        });
+        assert_eq!(orch.recycle("nope", &[file.clone()]), Err(RecycleError::UnknownRun));
+        assert!(file.exists(), "nothing was moved");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn goals_no_agent_can_do_are_refused() {
         let (mut orch, _) = orchestrator(&["--version"]);
-        assert!(matches!(orch.start("Open YouTube and play lofi", None, &[]), Err(StartError::NoAgent(_))));
+        set(&mut orch, |s| s.claude_enabled = false);
+        assert!(matches!(orch.start("Add a button", None, &[]), Err(StartError::NoAgent(_))));
         assert!(matches!(orch.start("  ", None, &[]), Err(StartError::EmptyGoal)));
         assert!(orch.runs().is_empty());
     }
@@ -737,6 +977,33 @@ mod tests {
     }
 
     #[test]
+    fn each_app_keeps_to_the_access_the_user_gave_it() {
+        let create = ApprovalRequest {
+            request_id: "r".into(),
+            tool: "mcp__claude_ai_Notion__notion-create-pages".into(),
+            label: "Notion · create pages".into(),
+            detail: "Week 3 notes".into(),
+            description: None,
+            input: serde_json::json!({}),
+        };
+        let here = Path::new(".");
+        let with = |access: AppAccess, full_autonomy: bool| {
+            let mut settings = Settings { full_autonomy, ..Settings::default() };
+            settings.app_access.insert("claude_ai_Notion".into(), access);
+            auto_answer(&settings, Access::UseApps, &create, here)
+        };
+
+        assert_eq!(with(AppAccess::Ask, false), None, "ask is the default and comes to the user");
+        assert_eq!(with(AppAccess::Act, false), Some(Answer::Allow));
+        assert!(matches!(with(AppAccess::Read, false), Some(Answer::Deny(_))));
+        assert!(matches!(with(AppAccess::Read, true), Some(Answer::Deny(_))), "read-only outranks full autonomy");
+        assert!(
+            matches!(auto_answer(&Settings::default(), Access::ReadOnly, &create, here), Some(Answer::Deny(_))),
+            "a read-only run refuses even in an app set to act"
+        );
+    }
+
+    #[test]
     fn git_rules_outrank_autonomy_and_protect_branches() {
         let (mut orch, root) = orchestrator(WAITS_FOR_STDIN);
         let repo = root.join("repo");
@@ -782,11 +1049,11 @@ mod tests {
         let run = orch.start("Add a logout button", None, &[]).unwrap();
         assert_eq!(run.status, RunStatus::Starting);
 
-        orch.outbox.send((run.id.clone(), HostMessage::Ready(false))).unwrap();
+        orch.outbox.send((run.id.clone(), HostMessage::Ready(vec![AppConnection { name: "Notion".into(), status: "pending".into() }]))).unwrap();
         orch.poll();
         assert_eq!(orch.runs()[0].status, RunStatus::Starting, "still connecting");
 
-        orch.outbox.send((run.id.clone(), HostMessage::Ready(true))).unwrap();
+        orch.outbox.send((run.id.clone(), HostMessage::Ready(vec![AppConnection { name: "Notion".into(), status: "connected".into() }]))).unwrap();
         orch.poll();
         assert_eq!(orch.runs()[0].status, RunStatus::Running);
 

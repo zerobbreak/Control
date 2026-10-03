@@ -1,9 +1,16 @@
 import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import "@fontsource/geist/400.css";
+import "@fontsource/geist/500.css";
+import "@fontsource/geist/600.css";
+import "@fontsource/geist-mono/400.css";
+import { BlobAvatar } from "./avatar/BlobAvatar";
+import { mostUrgent } from "./avatar/pillState";
 import ChangesPanel from "./ChangesPanel";
 import CommandCentre from "./CommandCentre";
-import type { AgentEvent, BoardSnapshot, RunSummary, SessionStatus, SessionSummary } from "./types";
+import { agentCards, sessionView, statusCounts } from "./runs";
+import type { AgentEvent, BoardSnapshot, PendingApproval, RunSummary, SessionStatus, SessionSummary } from "./types";
 import "./App.css";
 
 const STATUS_LABEL: Record<SessionStatus, string> = {
@@ -13,13 +20,31 @@ const STATUS_LABEL: Record<SessionStatus, string> = {
   idle: "Idle",
 };
 
+type View = "activity" | "changes" | "command";
+
 function App() {
-  const [prompt, setPrompt] = useState("");
   const [board, setBoard] = useState<BoardSnapshot>({ sessions: [], feed: [] });
   const [showIdle, setShowIdle] = useState(false);
   const [selected, setSelected] = useState<string | null>(null);
-  const [view, setView] = useState<"activity" | "changes" | "command">("activity");
+  const [view, setView] = useState<View>("activity");
   const [runs, setRuns] = useState<RunSummary[]>([]);
+  const [approvals, setApprovals] = useState<PendingApproval[]>([]);
+
+  useEffect(() => {
+    invoke<PendingApproval[]>("approvals_snapshot").then(setApprovals);
+    const unlisten = listen<PendingApproval[]>("approvals-updated", (e) => setApprovals(e.payload));
+    return () => {
+      unlisten.then((stop) => stop());
+    };
+  }, []);
+
+  // The pill can open the dashboard on a view, such as the Command Centre from "Set where pages go".
+  useEffect(() => {
+    const unlisten = listen<View>("dashboard-view", (e) => setView(e.payload));
+    return () => {
+      unlisten.then((stop) => stop());
+    };
+  }, []);
 
   useEffect(() => {
     invoke<BoardSnapshot>("board_snapshot").then(setBoard);
@@ -43,24 +68,20 @@ function App() {
     [runs, board.sessions],
   );
 
-  async function startTask(prompt: string) {
-    const response = await invoke<string>("start_task", { prompt });
-    console.log(response);
-  }
-
   const sessions = board.sessions.filter((s) => showIdle || s.status !== "idle");
   const feed = useMemo(
     () => board.feed.filter((e) => !selected || e.sessionId === selected).slice(0, 80),
     [board.feed, selected],
   );
-  const counts = board.sessions.reduce<Record<SessionStatus, number>>(
-    (acc, s) => ({ ...acc, [s.status]: acc[s.status] + 1 }),
-    { working: 0, stalled: 0, waitingForUser: 0, idle: 0 },
-  );
+  // The same agents, counted the same way, as the pill shows them.
+  const cards = agentCards(runs, board.sessions.filter((s) => s.status !== "idle"), approvals, sessionView);
+  const counts = statusCounts(cards);
+  const lead = mostUrgent(cards.map((c) => c.state));
 
   return (
     <div className="app">
       <header className="topbar">
+        <BlobAvatar role="mc" state={lead} size={28} />
         <h1>Mission Control</h1>
         <nav className="tabs" aria-label="Views">
           <button
@@ -85,30 +106,18 @@ function App() {
             Command Centre
           </button>
         </nav>
-        <div className="counts">
-          <span className="count working">{counts.working} working</span>
-          <span className="count stalled">{counts.stalled} stalled</span>
-          <span className="count waitingForUser">{counts.waitingForUser} waiting</span>
+        <span className="spacer" />
+        <div className="counts" aria-label="Agents">
+          {counts.needs > 0 && <span className="count needs">{counts.needs} needs you</span>}
+          {counts.working > 0 && <span className="count working">{counts.working} working</span>}
+          {counts.done > 0 && <span className="count done">{counts.done} done</span>}
+          {counts.needs + counts.working + counts.done === 0 && <span className="count idle">All quiet</span>}
         </div>
-        <form
-          className="task"
-          onSubmit={(e) => {
-            e.preventDefault();
-            startTask(prompt);
-          }}
-        >
-          <input
-            value={prompt}
-            onChange={(e) => setPrompt(e.target.value)}
-            placeholder="Give Mission Control a task…"
-          />
-          <button type="submit">Run</button>
-        </form>
       </header>
 
       {view === "command" ? (
         <main className="cc-scroll">
-          <CommandCentre />
+          <CommandCentre onViewAllSessions={() => { setShowIdle(true); setSelected(null); setView("activity"); }} />
         </main>
       ) : view === "changes" ? (
         <ChangesPanel folders={folders} />

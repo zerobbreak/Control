@@ -1,20 +1,23 @@
+/* The dashboard shares the pill's look: near-black panels, Geist, blue for work, amber for you. */
 :root {
-  --bg: #0e1116;
-  --panel: #161b22;
-  --panel-2: #1c222b;
-  --border: #2a313c;
-  --text: #e6edf3;
-  --muted: #8b949e;
-  --working: #3fb950;
-  --stalled: #d29922;
-  --waiting: #58a6ff;
-  --idle: #6e7681;
-  --error: #f85149;
+  --bg: #0d0d10;
+  --panel: #121216;
+  --panel-2: #1a1a20;
+  --border: rgba(255, 255, 255, 0.08);
+  --text: #f4f4f5;
+  --muted: #8b8b94;
+  --working: #60a5fa;
+  --stalled: #fbbf24;
+  --waiting: #60a5fa;
+  --idle: #71717a;
+  --done: #4ade80;
+  --error: #f87171;
   --claude: #d97757;
   --gemini: #8ab4f8;
+  --mono: "Geist Mono", ui-monospace, Consolas, monospace;
 
-  font-family: Inter, "Segoe UI", system-ui, sans-serif;
-  font-size: 14px;
+  font-family: Geist, "Segoe UI", system-ui, sans-serif;
+  font-size: 13.5px;
   line-height: 1.45;
   color: var(--text);
   background: var(--bg);
@@ -39,35 +42,49 @@ body {
 .topbar {
   display: flex;
   align-items: center;
-  gap: 20px;
-  padding: 12px 20px;
+  gap: 16px;
+  height: 56px;
+  padding: 0 18px;
   border-bottom: 1px solid var(--border);
-  background: var(--panel);
+  background: var(--bg);
 }
 
 .topbar h1 {
-  margin: 0;
-  font-size: 16px;
+  margin: 0 8px 0 -6px;
+  font-size: 14px;
   font-weight: 600;
-  letter-spacing: 0.02em;
 }
 
+.topbar .spacer { flex: 1; }
+
+/* The same chips as the pill: who needs you, who is working, who is done. */
 .counts {
   display: flex;
-  gap: 12px;
-  color: var(--muted);
-  font-size: 13px;
+  gap: 6px;
+}
+
+.count {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  padding: 0 10px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.05);
+  color: #d4d4d8;
+  font-size: 11.5px;
 }
 
 .count::before {
   content: "";
-  display: inline-block;
-  width: 8px;
-  height: 8px;
-  margin-right: 6px;
+  width: 6px;
+  height: 6px;
   border-radius: 50%;
+  background: var(--idle);
 }
+.count.needs::before { background: var(--stalled); }
 .count.working::before { background: var(--working); }
+.count.done::before { background: var(--done); }
 .count.stalled::before { background: var(--stalled); }
 .count.waitingForUser::before { background: var(--waiting); }
 
@@ -196,7 +213,7 @@ button {
 .project {
   color: var(--muted);
   font-size: 12px;
-  font-family: ui-monospace, Consolas, monospace;
+  font-family: var(--mono);
 }
 
 .activity,
@@ -209,7 +226,7 @@ button {
 }
 
 .activity {
-  font-family: ui-monospace, Consolas, monospace;
+  font-family: var(--mono);
   color: var(--working);
 }
 .card.stalled .activity { color: var(--stalled); }
@@ -248,7 +265,7 @@ button {
 }
 .feed-item .when { color: var(--muted); font-size: 12px; }
 .feed-item.userPrompt .text { color: var(--waiting); }
-.feed-item.toolCall .text { font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
+.feed-item.toolCall .text { font-family: var(--mono); font-size: 12px; }
 .feed-item.toolResult .icon,
 .feed-item.error .icon,
 .feed-item.error .text { color: var(--error); }
@@ -258,23 +275,27 @@ button {
 .tabs {
   display: flex;
   gap: 2px;
-  padding: 2px;
-  border-radius: 8px;
-  background: var(--bg);
+  padding: 3px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.04);
 }
 
 .tabs button {
-  padding: 5px 12px;
+  height: 28px;
+  padding: 0 12px;
   border: none;
-  border-radius: 6px;
+  border-radius: 8px;
   background: none;
   color: var(--muted);
-  font-size: 13px;
+  font-size: 12.5px;
 }
 
+.tabs button:hover { color: var(--text); }
+
 .tabs button.on {
-  background: var(--panel-2);
+  background: rgba(255, 255, 255, 0.1);
   color: var(--text);
+  font-weight: 500;
 }
 
 /* ---------- Command Centre ---------- */
@@ -286,9 +307,23 @@ button {
 }
 
 .command-centre {
-  max-width: 760px;
+  max-width: 1120px;
   margin: 0 auto;
-  padding: 24px 20px 48px;
+  padding: 20px 24px 48px;
+}
+
+/* Two columns of settings, one when the window is narrow. */
+.cc-columns {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  align-items: start;
+}
+
+.cc-column { display: flex; flex-direction: column; gap: 16px; }
+
+@media (max-width: 900px) {
+  .cc-columns { grid-template-columns: minmax(0, 1fr); }
 }
 
 .cc-head {
@@ -311,47 +346,72 @@ button {
   font-size: 13px;
 }
 
+.cc-action {
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--panel-2);
+  color: var(--text);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.cc-action:hover { border-color: var(--waiting); }
+
 .save { font-size: 12px; color: var(--muted); white-space: nowrap; }
-.save.ok { color: var(--working); }
+.save.ok { color: var(--done); }
 .save.error { color: var(--error); white-space: normal; }
 
-.cc-section { margin-bottom: 24px; }
+/* Each section is one card with its title inside, as in the pill. */
+.cc-section {
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.025);
+}
 
 .cc-section h3 {
-  margin: 0 0 8px;
+  margin: 0;
+  padding: 12px 16px 10px;
   color: var(--muted);
-  font-size: 12px;
-  font-weight: 600;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  font-weight: 400;
   letter-spacing: 0.08em;
   text-transform: uppercase;
 }
 
-.cc-rows {
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: var(--panel);
-}
+.cc-rows { border-top: 1px solid rgba(255, 255, 255, 0.06); }
 
-.cc-section.danger .cc-rows { border-color: color-mix(in srgb, var(--error) 45%, var(--border)); }
+.cc-section.danger { border-color: color-mix(in srgb, var(--error) 35%, transparent); }
 .cc-section.danger h3 { color: var(--error); }
 
 .cc-row {
   display: flex;
   align-items: center;
-  gap: 24px;
+  gap: 20px;
   padding: 14px 16px;
 }
 
-.cc-row + .cc-row { border-top: 1px solid var(--border); }
+.cc-row + .cc-row { border-top: 1px solid rgba(255, 255, 255, 0.06); }
 
 .cc-text { flex: 1; min-width: 0; }
-.cc-label { font-weight: 600; margin-bottom: 2px; }
+.cc-text p { font-size: 12px; line-height: 1.45; }
+
+.cc-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 2px;
+  font-size: 13px;
+  font-weight: 600;
+}
 .cc-control { flex: none; }
 
 .switch {
   position: relative;
   flex: none;
-  width: 40px;
+  width: 38px;
   height: 22px;
   padding: 0;
   border: 1px solid var(--border);
@@ -372,7 +432,7 @@ button {
 }
 
 .switch.on { background: var(--waiting); border-color: var(--waiting); }
-.switch.on span { transform: translateX(18px); background: #fff; }
+.switch.on span { transform: translateX(16px); background: #fff; }
 .cc-section.danger .switch.on { background: var(--error); border-color: var(--error); }
 
 .segmented {
@@ -464,7 +524,7 @@ button {
 
 .add button:disabled { opacity: 0.5; cursor: default; }
 
-.mono { font-family: ui-monospace, Consolas, monospace; }
+.mono { font-family: var(--mono); }
 
 .confirm { display: flex; gap: 8px; }
 
@@ -499,8 +559,9 @@ button {
 .folders h2 {
   margin: 0;
   color: var(--muted);
-  font-size: 12px;
-  font-weight: 600;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  font-weight: 400;
   letter-spacing: 0.08em;
   text-transform: uppercase;
 }
@@ -528,7 +589,9 @@ button {
 
 .folders li button:hover { background: var(--panel-2); }
 .folders li button.on { background: var(--panel-2); box-shadow: inset 2px 0 0 var(--waiting); }
-.folders .add { flex-wrap: wrap; }
+/* In the sidebar the form sits below the list at its own height; flex-basis 100% made it fill the column. */
+.folders .add { flex: none; flex-basis: auto; }
+.folders .add input { min-width: 0; }
 
 .repo {
   display: flex;
@@ -566,13 +629,13 @@ button {
   background: var(--bg);
   color: var(--text);
   font: inherit;
-  font-family: ui-monospace, Consolas, monospace;
+  font-family: var(--mono);
   font-size: 13px;
 }
 
 .new-branch { display: flex; gap: 6px; }
 .new-branch button { padding: 6px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel-2); }
-.sync { color: var(--muted); font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
+.sync { color: var(--muted); font-family: var(--mono); font-size: 12px; }
 .spacer { flex: 1; }
 
 .primary-button {
@@ -601,7 +664,7 @@ button {
   white-space: pre-wrap;
 }
 
-.notice.ok { background: color-mix(in srgb, var(--working) 14%, transparent); color: var(--working); }
+.notice.ok { background: color-mix(in srgb, var(--done) 14%, transparent); color: var(--done); }
 .notice.error { background: color-mix(in srgb, var(--error) 14%, transparent); color: var(--error); }
 .notice button { margin-left: auto; border: none; background: none; color: inherit; }
 
@@ -660,7 +723,7 @@ button {
   color: var(--muted);
 }
 
-.kind.added, .kind.untracked { color: var(--working); }
+.kind.added, .kind.untracked { color: var(--done); }
 .kind.modified, .kind.renamed, .kind.copied, .kind.typeChanged { color: var(--stalled); }
 .kind.deleted, .kind.conflicted { color: var(--error); }
 
@@ -688,7 +751,7 @@ button {
 .pr { display: flex; align-items: center; gap: 8px; }
 .pr-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pr-state { padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; background: var(--panel-2); }
-.pr-state.open { color: var(--working); }
+.pr-state.open { color: var(--done); }
 .pr-state.merged { color: #a371f7; }
 .pr-state.closed { color: var(--error); }
 
@@ -714,13 +777,13 @@ button {
   margin: 0;
   padding: 8px 0;
   overflow: auto;
-  font-family: ui-monospace, Consolas, monospace;
+  font-family: var(--mono);
   font-size: 12px;
   line-height: 1.5;
 }
 
 .diff pre div { padding: 0 16px; white-space: pre; }
-.add-line { background: color-mix(in srgb, var(--working) 14%, transparent); }
+.add-line { background: color-mix(in srgb, var(--done) 14%, transparent); }
 .del-line { background: color-mix(in srgb, var(--error) 14%, transparent); }
 .hunk-line { color: var(--waiting); }
 .meta-line { color: var(--muted); }

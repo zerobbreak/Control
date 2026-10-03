@@ -5,19 +5,24 @@ mod claude;
 mod gemini;
 
 pub mod agent;
+pub mod apps;
 pub mod board;
+pub mod context;
 pub mod events;
 pub mod git;
+pub mod media;
 pub mod orchestrator;
 pub mod router;
 pub mod settings;
 pub mod watcher;
 
-pub use agent::{Agent, Answer, ApprovalRequest, ClaudeAssistant, ClaudeCode};
+pub use apps::{App, AppAccess, AppStatus};
+pub use agent::{Agent, AppConnection, Answer, ApprovalRequest, ClaudeAssistant, ClaudeBrowser, ClaudeCode};
+pub use context::{ContextItem, ContextKind};
 pub use board::{Board, BoardSnapshot, SessionStatus, SessionSummary};
 pub use events::{AgentEvent, AgentKind, EventKind};
-pub use orchestrator::{Orchestrator, PendingApproval, RunStatus, RunSummary, RuntimeConfig, StartError};
+pub use orchestrator::{Orchestrator, PendingApproval, Preview, RecycleError, RunStatus, RunSummary, RuntimeConfig, StartError};
 pub use router::{Access, Context, Decision, TaskKind, Tier};
 pub use git::{GitError, GitRepo, PullRequest, RepoStatus};
-pub use settings::{GitRule, Settings};
+pub use settings::{Capability, GitRule, Settings};
 pub use watcher::{TranscriptWatcher, WatcherConfig};

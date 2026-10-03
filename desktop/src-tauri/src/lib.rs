@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use mission_control::{
-    Answer, Board, BoardSnapshot, ClaudeAssistant, ClaudeCode, GitError, GitRepo, Orchestrator, PendingApproval, PullRequest, RepoStatus,
+    App, Answer, Board, Capability, ClaudeBrowser, ContextItem, BoardSnapshot, ClaudeAssistant, ClaudeCode, GitError, GitRepo, Orchestrator, PendingApproval, Preview, PullRequest, RepoStatus,
     RunSummary, RuntimeConfig, Settings, TranscriptWatcher, WatcherConfig,
 };
 use tauri::{Emitter, LogicalSize, Manager, PhysicalPosition, WebviewWindow, WindowEvent};
@@ -30,6 +30,64 @@ fn start_task(
 ) -> Result<RunSummary, String> {
     let attachments = attachments.unwrap_or_default();
     orchestrator.lock().unwrap().start(&prompt, folder.as_deref(), &attachments).map_err(|e| e.to_string())
+}
+
+/// What `start_task` would do with the same goal, without starting anything, for the user to review.
+#[tauri::command]
+fn preview_task(
+    orchestrator: tauri::State<SharedOrchestrator>,
+    prompt: String,
+    folder: Option<PathBuf>,
+    attachments: Option<Vec<PathBuf>>,
+) -> Result<Preview, String> {
+    let attachments = attachments.unwrap_or_default();
+    orchestrator.lock().unwrap().preview(&prompt, folder.as_deref(), &attachments).map_err(|e| e.to_string())
+}
+
+/// What each dropped or picked path is, for the pill's context list. Reads only file metadata.
+#[tauri::command]
+async fn describe_paths(paths: Vec<PathBuf>) -> Vec<ContextItem> {
+    tauri::async_runtime::spawn_blocking(move || paths.iter().map(|p| mission_control::context::describe(p)).collect())
+        .await
+        .unwrap_or_default()
+}
+
+/// Moves files an agent suggested removing to the Recycle Bin. The runtime checks the user allowed
+/// recycling and that every file is inside a folder they handed to that run.
+#[tauri::command]
+async fn recycle_files(orchestrator: tauri::State<'_, SharedOrchestrator>, run_id: String, paths: Vec<PathBuf>) -> Result<u64, String> {
+    orchestrator.lock().unwrap().recycle(&run_id, &paths).map_err(|e| e.to_string())
+}
+
+fn media_allowed(orchestrator: &SharedOrchestrator) -> Result<(), String> {
+    match orchestrator.lock().unwrap().settings().capability(Capability::MediaControls) {
+        Some(true) => Ok(()),
+        Some(false) => Err("media controls are turned off in the Command Centre".into()),
+        None => Err("media controls need your permission first".into()),
+    }
+}
+
+/// What is playing right now, if media controls are allowed.
+#[tauri::command]
+async fn media_now(orchestrator: tauri::State<'_, SharedOrchestrator>) -> Result<Option<mission_control::media::NowPlaying>, String> {
+    media_allowed(&orchestrator)?;
+    tauri::async_runtime::spawn_blocking(mission_control::media::now_playing).await.map_err(|e| e.to_string())?
+}
+
+/// Play or pause, skip, or change the system volume, if media controls are allowed.
+#[tauri::command]
+async fn media_control(orchestrator: tauri::State<'_, SharedOrchestrator>, action: mission_control::media::MediaAction) -> Result<(), String> {
+    media_allowed(&orchestrator)?;
+    tauri::async_runtime::spawn_blocking(move || mission_control::media::control(action)).await.map_err(|e| e.to_string())?
+}
+
+/// The apps agents can work in and whether each is connected. Checking takes a few seconds.
+#[tauri::command]
+async fn list_apps() -> Result<Vec<App>, String> {
+    tauri::async_runtime::spawn_blocking(mission_control::apps::list_apps)
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| format!("could not ask Claude Code for its apps: {e}"))
 }
 
 #[tauri::command]
@@ -189,10 +247,15 @@ fn place_pill(window: &WebviewWindow, width: f64, height: f64) -> tauri::Result<
     Ok(())
 }
 
+/// Brings the dashboard forward, on one of its views ("activity", "changes" or "command") if asked.
 #[tauri::command]
-fn open_dashboard(app: tauri::AppHandle) -> Result<(), String> {
+fn open_dashboard(app: tauri::AppHandle, view: Option<String>) -> Result<(), String> {
     let window = app.get_webview_window("main").ok_or("dashboard window is missing")?;
-    window.show().and_then(|_| window.unminimize()).and_then(|_| window.set_focus()).map_err(|e| e.to_string())
+    window.show().and_then(|_| window.unminimize()).and_then(|_| window.set_focus()).map_err(|e| e.to_string())?;
+    if let Some(view) = view {
+        let _ = app.emit_to("main", "dashboard-view", view);
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -211,11 +274,21 @@ fn spawn_watcher(app: tauri::AppHandle, board: SharedBoard, orchestrator: Shared
     std::thread::spawn(move || {
         let mut watcher = TranscriptWatcher::new(config);
         loop {
-            let (runs, approvals, watch_all) = {
+            let (runs, approvals, watch_all, media_allowed) = {
                 let mut orchestrator = orchestrator.lock().unwrap();
                 orchestrator.poll();
-                (orchestrator.runs(), orchestrator.approvals(), orchestrator.settings().watch_other_sessions)
+                let settings = orchestrator.settings();
+                (
+                    orchestrator.runs(),
+                    orchestrator.approvals(),
+                    settings.watch_other_sessions,
+                    settings.capability(Capability::MediaControls) == Some(true),
+                )
             };
+            // What is playing is only looked at once the user has allowed media controls.
+            if media_allowed {
+                let _ = app.emit("media-updated", mission_control::media::now_playing().ok().flatten());
+            }
             let own: HashSet<String> = runs.iter().map(|r| r.id.clone()).collect();
             watcher.restrict_to(if watch_all { None } else { Some(own.clone()) });
 
@@ -242,10 +315,11 @@ fn spawn_watcher(app: tauri::AppHandle, board: SharedBoard, orchestrator: Shared
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(SharedBoard::default())
         .setup(|app| {
             let runtime = RuntimeConfig::from_home().ok_or("could not find the home directory")?;
-            let orchestrator: SharedOrchestrator = Arc::new(Mutex::new(Orchestrator::new(runtime, vec![Arc::new(ClaudeCode), Arc::new(ClaudeAssistant)])));
+            let orchestrator: SharedOrchestrator = Arc::new(Mutex::new(Orchestrator::new(runtime, vec![Arc::new(ClaudeCode), Arc::new(ClaudeAssistant), Arc::new(ClaudeBrowser)])));
             app.manage(orchestrator.clone());
             let board = app.state::<SharedBoard>().inner().clone();
             spawn_watcher(app.handle().clone(), board, orchestrator);
@@ -267,6 +341,12 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             board_snapshot,
             start_task,
+            preview_task,
+            list_apps,
+            describe_paths,
+            recycle_files,
+            media_now,
+            media_control,
             cancel_task,
             runs_snapshot,
             get_settings,

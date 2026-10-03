@@ -27,6 +27,8 @@ pub struct Launch<'a> {
     pub max_budget_usd: Option<f64>,
     /// Where new Notion pages go when the goal does not say.
     pub notion_parent: Option<&'a str>,
+    /// Searching and opening in connected apps runs without asking.
+    pub read_apps_freely: bool,
 }
 
 /// An agent asking to use a tool its permission mode does not already allow.
@@ -50,10 +52,26 @@ pub struct ApprovalRequest {
 #[derive(Debug, Clone, PartialEq)]
 pub enum HostMessage {
     Approval(ApprovalRequest),
-    /// Answer to a readiness probe: true once the agent's app connections have settled.
-    Ready(bool),
+    /// Answer to a readiness probe: each app connection and how it is going.
+    Ready(Vec<AppConnection>),
     /// The agent has finished the goal, with its final answer; closing its input lets it exit.
     Finished(Option<String>),
+}
+
+/// One of the agent's app connections while it starts, such as the claude.ai Notion connector.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppConnection {
+    /// As a person would name it, e.g. "Notion".
+    pub name: String,
+    /// "connected", "pending", "needs-auth" or "failed", as Claude Code reports it.
+    pub status: String,
+}
+
+/// Connections have settled once none is still pending: a failed one or one that needs signing
+/// in will not connect by waiting, so it does not hold the goal back.
+pub fn connections_settled(apps: &[AppConnection]) -> bool {
+    apps.iter().all(|a| a.status != "pending")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,6 +107,60 @@ pub struct ClaudeCode;
 /// Claude Code as a general assistant: it reads the files it is given and works in the user's
 /// apps through their claude.ai connectors, but cannot run commands or change files.
 pub struct ClaudeAssistant;
+
+/// Claude Code driving the user's Chrome through the Claude in Chrome extension. It has the
+/// browser's tools and nothing else: no files, no commands, no connected apps.
+pub struct ClaudeBrowser;
+
+/// The browser tools, allowed as a whole: the user granted browser control before the run started.
+const CHROME_TOOLS: &str = "mcp__claude-in-chrome";
+
+const BROWSER_PROMPT: &str = "You are the browser agent inside Mission Control, a desktop app. Do what \
+the user asks in their Chrome browser with the browser tools: open pages, search, click and play. Work in \
+one tab. Never sign in, buy, post, send or accept anything, and never type passwords or payment details: \
+if the task needs that, stop and say what the user must do. When you are done, say in one short line \
+what is open or playing.";
+
+impl Agent for ClaudeBrowser {
+    fn kind(&self) -> AgentKind {
+        AgentKind::Claude
+    }
+
+    fn handles(&self, task: TaskKind) -> bool {
+        task == TaskKind::Browse
+    }
+
+    fn model(&self, tier: Tier) -> &'static str {
+        claude_model(tier)
+    }
+
+    fn command(&self, launch: &Launch) -> Command {
+        // "default" so the allowed browser tools run; anything else asks, and a read-only run's
+        // requests are refused by Mission Control.
+        let mut cmd = claude_command(launch, "default");
+        cmd.arg("--chrome")
+            .env("ENABLE_CLAUDEAI_MCP_SERVERS", "false")
+            .args(["--tools", ""])
+            .args(["--allowedTools", CHROME_TOOLS])
+            .args(["--append-system-prompt", BROWSER_PROMPT]);
+        if let Some(usd) = launch.max_budget_usd {
+            cmd.args(["--max-budget-usd", &format!("{usd:.2}")]);
+        }
+        cmd
+    }
+
+    fn goal_message(&self, goal: &str, attachments: &[PathBuf]) -> String {
+        claude_goal_message(goal, attachments)
+    }
+
+    fn parse(&self, line: &str) -> Option<HostMessage> {
+        claude_parse(line)
+    }
+
+    fn reply(&self, request: &ApprovalRequest, answer: &Answer) -> String {
+        claude_reply(request, answer)
+    }
+}
 
 impl Agent for ClaudeCode {
     fn kind(&self) -> AgentKind {
@@ -178,10 +250,16 @@ impl Agent for ClaudeAssistant {
             ));
         }
         let mut cmd = claude_command(launch, permission_mode);
-        cmd.args(["--tools", "Read,Glob,Grep"])
-            .arg("--allowedTools")
-            .arg(READ_ONLY_CONNECTOR_TOOLS.join(","))
-            .args(["--append-system-prompt", &prompt]);
+        // The fast model loads every tool definition up front, and the connectors' alone are
+        // more than its context holds, so a run capped to it goes without them.
+        if launch.tier == Tier::Fast {
+            cmd.env("ENABLE_CLAUDEAI_MCP_SERVERS", "false");
+        }
+        cmd.args(["--tools", "Read,Glob,Grep"]).args(["--append-system-prompt", &prompt]);
+        // Reading in apps runs freely unless the user wants every app request to ask.
+        if launch.read_apps_freely {
+            cmd.arg("--allowedTools").arg(READ_ONLY_CONNECTOR_TOOLS.join(","));
+        }
         if let Some(usd) = launch.max_budget_usd {
             cmd.args(["--max-budget-usd", &format!("{usd:.2}")]);
         }
@@ -248,7 +326,18 @@ fn claude_goal_message(goal: &str, attachments: &[PathBuf]) -> String {
     if !attachments.is_empty() {
         content.push_str("\n\nAttached:");
         for path in attachments {
-            content.push_str(&format!("\n- {}", path.display()));
+            // A Windows internet shortcut is a link, not a document: hand over where it points.
+            match crate::context::shortcut_url(path) {
+                Some(url) => content.push_str(&format!(
+                    "\n- {} (a link: {url}. Open it with a connected app or the web; the shortcut file itself holds nothing else)",
+                    crate::context::shortcut_name(path)
+                )),
+                None => content.push_str(&format!("\n- {}", path.display())),
+            }
+            // The agent can read files but not see sizes or ages, so a loose folder comes with a scan.
+            if path.is_dir() && !crate::context::is_project(path) {
+                content.push_str(&format!("\n\n{}\n", crate::context::folder_report(path)));
+            }
         }
     }
     json!({"type": "user", "message": {"role": "user", "content": content}}).to_string()
@@ -274,7 +363,15 @@ fn claude_parse(line: &str) -> Option<HostMessage> {
         // The answer to a readiness probe lists every connector and its status.
         "control_response" => {
             let servers = message["response"]["response"]["mcpServers"].as_array()?;
-            Some(HostMessage::Ready(servers.iter().all(|s| s["status"] != "pending")))
+            let apps = servers
+                .iter()
+                .filter_map(|s| {
+                    let name = s["name"].as_str()?;
+                    let name = name.strip_prefix("claude.ai ").unwrap_or(name).to_string();
+                    Some(AppConnection { name, status: s["status"].as_str().unwrap_or("pending").to_string() })
+                })
+                .collect();
+            Some(HostMessage::Ready(apps))
         }
         _ => None,
     }
@@ -352,6 +449,7 @@ mod tests {
             ask_before_edits: false,
             max_budget_usd: None,
             notion_parent: None,
+            read_apps_freely: true,
         }
     }
 
@@ -406,11 +504,55 @@ mod tests {
         assert_eq!(after(&args, "--add-dir"), file.parent().and_then(Path::to_str));
         let allowed = after(&args, "--allowedTools").unwrap();
         assert!(allowed.contains("notion-search") && !allowed.contains("create"));
+        launch.read_apps_freely = false;
+        assert_eq!(after(&self::args(&ClaudeAssistant.command(&launch)), "--allowedTools"), None, "reads ask too when the user says so");
         assert!(after(&args, "--append-system-prompt").unwrap().contains("under: Uni Notes"));
 
         let message: Value = serde_json::from_str(&ClaudeAssistant.goal_message("Make a page", &attachments)).unwrap();
         let content = message["message"]["content"].as_str().unwrap();
         assert!(content.starts_with("Make a page") && content.contains(file.to_str().unwrap()));
+    }
+
+    #[test]
+    fn a_dropped_shortcut_is_handed_over_as_its_link() {
+        let dir = std::env::temp_dir().join(format!("mc-shortcut-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let shortcut = dir.join("Memo 2021.pdf.url");
+        std::fs::write(&shortcut, "[InternetShortcut]\nURL=https://drive.google.com/file/d/abc/view\n").unwrap();
+
+        let message: Value = serde_json::from_str(&ClaudeAssistant.goal_message("What is this about?", &[shortcut])).unwrap();
+        let content = message["message"]["content"].as_str().unwrap();
+        assert!(content.contains("- Memo 2021.pdf (a link: https://drive.google.com/file/d/abc/view."), "{content}");
+        assert!(!content.contains(".pdf.url"), "the shortcut file itself is not what the user meant");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_fast_model_goes_without_connectors_it_cannot_hold() {
+        let connectors_off = |tier: Tier| {
+            let mut launch = launch(Access::UseApps);
+            launch.tier = tier;
+            ClaudeAssistant
+                .command(&launch)
+                .get_envs()
+                .any(|(k, v)| k == "ENABLE_CLAUDEAI_MCP_SERVERS" && v.is_some_and(|v| v == "false"))
+        };
+        assert!(connectors_off(Tier::Fast));
+        assert!(!connectors_off(Tier::Balanced));
+    }
+
+    #[test]
+    fn the_browser_agent_has_chrome_and_nothing_else() {
+        let mut launch = launch(Access::ReadOnly);
+        launch.tier = Tier::Fast;
+        let cmd = ClaudeBrowser.command(&launch);
+        let args = args(&cmd);
+        assert!(args.iter().any(|a| a == "--chrome"));
+        assert_eq!(after(&args, "--tools"), Some(""), "no files, no commands");
+        assert_eq!(after(&args, "--allowedTools"), Some(CHROME_TOOLS));
+        assert_eq!(after(&args, "--model"), Some(claude_model(Tier::Fast)));
+        assert!(cmd.get_envs().any(|(k, v)| k == "ENABLE_CLAUDEAI_MCP_SERVERS" && v.is_some_and(|v| v == "false")));
+        assert!(ClaudeBrowser.handles(TaskKind::Browse) && !ClaudeCode.handles(TaskKind::Browse));
     }
 
     #[test]
@@ -424,9 +566,19 @@ mod tests {
                 r#"{{"type":"control_response","response":{{"subtype":"success","request_id":"s1","response":{{"mcpServers":[{{"name":"claude.ai Gmail","status":"connected"}},{{"name":"claude.ai Notion","status":"{notion}"}},{{"name":"claude.ai Google Drive","status":"needs-auth"}}]}}}}}}"#
             )
         };
-        assert_eq!(claude_parse(&status("pending")), Some(HostMessage::Ready(false)));
-        assert_eq!(claude_parse(&status("connected")), Some(HostMessage::Ready(true)));
-        assert_eq!(claude_parse(&status("failed")), Some(HostMessage::Ready(true)), "a failed connector does not hold the run up");
+        let settled = |notion: &str| match claude_parse(&status(notion)) {
+            Some(HostMessage::Ready(apps)) => connections_settled(&apps),
+            other => panic!("expected readiness, got {other:?}"),
+        };
+        assert!(!settled("pending"));
+        assert!(settled("connected"));
+        assert!(settled("failed"), "a failed connector does not hold the run up");
+        let Some(HostMessage::Ready(apps)) = claude_parse(&status("pending")) else { unreachable!() };
+        assert_eq!(
+            apps.iter().map(|a| (a.name.as_str(), a.status.as_str())).collect::<Vec<_>>(),
+            vec![("Gmail", "connected"), ("Notion", "pending"), ("Google Drive", "needs-auth")],
+            "each app keeps its own status, named without the claude.ai prefix"
+        );
     }
 
     // Recorded from Claude Code 2.1.288.
