@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -45,6 +46,8 @@ impl RuntimeConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum RunStatus {
+    /// Waiting for the agent's app connections before handing it the goal.
+    Starting,
     Running,
     /// Paused until someone answers one of its permission requests.
     NeedsApproval,
@@ -69,6 +72,8 @@ pub struct RunSummary {
     pub started_at: DateTime<Utc>,
     pub ended_at: Option<DateTime<Utc>>,
     pub log_path: String,
+    /// The agent's final answer, in full, once it has finished the goal.
+    pub result: Option<String>,
     /// Requests the Command Centre's rules answered without asking.
     pub auto_allowed: u32,
     pub auto_denied: u32,
@@ -91,6 +96,8 @@ pub struct PendingApproval {
 pub enum StartError {
     EmptyGoal,
     MissingFolder(PathBuf),
+    /// An attached file or folder does not exist.
+    MissingAttachment(PathBuf),
     /// The Command Centre does not allow runs in this folder.
     FolderNotAllowed(PathBuf),
     /// No registered agent can do this kind of task yet.
@@ -103,6 +110,7 @@ impl std::fmt::Display for StartError {
         match self {
             Self::EmptyGoal => write!(f, "the goal is empty"),
             Self::MissingFolder(path) => write!(f, "{} is not a folder", path.display()),
+            Self::MissingAttachment(path) => write!(f, "{} does not exist", path.display()),
             Self::FolderNotAllowed(path) => {
                 write!(f, "the Command Centre does not allow runs in {}", path.display())
             }
@@ -118,6 +126,8 @@ impl std::error::Error for StartError {}
 const READ_ONLY_REFUSAL: &str =
     "This run is read-only: Mission Control started it to answer a question, not to change anything.";
 const LOCKDOWN_REASON: &str = " Read-only, because read-only mode is on in the Command Centre.";
+/// How long a run waits for its app connections before starting without the slow ones.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 
 struct Run {
     summary: RunSummary,
@@ -125,6 +135,11 @@ struct Run {
     child: Option<Child>,
     /// Open until the agent finishes its goal; closing it lets the agent exit.
     stdin: Option<ChildStdin>,
+    /// The goal, held back until the agent's app connections are ready.
+    waiting_goal: Option<String>,
+    started: Instant,
+    /// A readiness probe is out and has not been answered yet.
+    probing: bool,
 }
 
 pub struct Orchestrator {
@@ -163,11 +178,15 @@ impl Orchestrator {
         self.runs.iter().any(|r| r.summary.id == session_id)
     }
 
-    /// Routes `goal`, starts an agent on it in `folder` (or the scratch folder) and returns the run.
-    pub fn start(&mut self, goal: &str, folder: Option<&Path>) -> Result<RunSummary, StartError> {
+    /// Routes `goal`, starts an agent on it in `folder` (or the scratch folder) with any
+    /// `attachments` the user handed over, and returns the run.
+    pub fn start(&mut self, goal: &str, folder: Option<&Path>, attachments: &[PathBuf]) -> Result<RunSummary, StartError> {
         let goal = goal.trim();
         if goal.is_empty() {
             return Err(StartError::EmptyGoal);
+        }
+        if let Some(missing) = attachments.iter().find(|a| !a.exists()) {
+            return Err(StartError::MissingAttachment(missing.clone()));
         }
         let workdir = match folder {
             Some(dir) if !dir.is_dir() => return Err(StartError::MissingFolder(dir.to_path_buf())),
@@ -181,11 +200,12 @@ impl Orchestrator {
             }
         };
 
-        let decision = bounded(router::route(goal), &self.settings);
-        let settings = &self.settings;
-        let Some(agent) =
-            self.agents.iter().find(|a| a.handles(decision.task) && settings.agent_enabled(a.kind())).cloned()
-        else {
+        let context = router::Context { folder: folder.is_some(), attachments: !attachments.is_empty() };
+        let decision = bounded(router::route(goal, context), &self.settings);
+        if !self.settings.allows_task(decision.task) {
+            return Err(StartError::NoAgent(decision));
+        }
+        let Some(agent) = self.agents.iter().find(|a| a.handles(decision.task)).cloned() else {
             return Err(StartError::NoAgent(decision));
         };
 
@@ -194,10 +214,12 @@ impl Orchestrator {
             session_id: &id,
             goal,
             workdir: &workdir,
+            attachments,
             tier: decision.tier,
             access: decision.access,
             ask_before_edits: self.settings.ask_before_edits,
             max_budget_usd: self.settings.max_budget_usd,
+            notion_parent: self.settings.notion_parent.as_deref(),
         };
         fs::create_dir_all(&self.config.runs_dir).map_err(StartError::Spawn)?;
         let log_path = self.config.runs_dir.join(format!("{id}.log"));
@@ -206,7 +228,13 @@ impl Orchestrator {
         let mut child = spawn_hosted(agent.command(&launch), &log).map_err(StartError::Spawn)?;
         let mut stdin = child.stdin.take().expect("stdin is piped");
         let stdout = child.stdout.take().expect("stdout is piped");
-        if let Err(err) = writeln!(stdin, "{}", agent.goal_message(goal)) {
+        // Agents that work in apps first say when their connections are ready; the goal waits.
+        let goal_line = agent.goal_message(goal, attachments);
+        let (first_line, waiting_goal, status) = match agent.readiness_probe() {
+            Some(probe) => (probe, Some(goal_line), RunStatus::Starting),
+            None => (goal_line, None, RunStatus::Running),
+        };
+        if let Err(err) = writeln!(stdin, "{first_line}") {
             let _ = child.kill();
             return Err(StartError::Spawn(err));
         }
@@ -219,15 +247,25 @@ impl Orchestrator {
             agent: agent.kind(),
             model: agent.model(decision.tier).to_string(),
             decision,
-            status: RunStatus::Running,
+            status,
             exit_code: None,
             started_at: Utc::now(),
             ended_at: None,
             log_path: log_path.display().to_string(),
+            result: None,
             auto_allowed: 0,
             auto_denied: 0,
         };
-        self.runs.push(Run { summary: summary.clone(), agent, child: Some(child), stdin: Some(stdin) });
+        let probing = waiting_goal.is_some();
+        self.runs.push(Run {
+            summary: summary.clone(),
+            agent,
+            child: Some(child),
+            stdin: Some(stdin),
+            waiting_goal,
+            started: Instant::now(),
+            probing,
+        });
         Ok(summary)
     }
 
@@ -271,7 +309,12 @@ impl Orchestrator {
         while let Ok((run_id, message)) = self.inbox.try_recv() {
             let Some(run) = self.runs.iter_mut().find(|r| r.summary.id == run_id) else { continue };
             match message {
-                HostMessage::Finished => run.stdin = None,
+                HostMessage::Finished(result) => {
+                    run.summary.result = result;
+                    run.stdin = None;
+                }
+                HostMessage::Ready(true) => release_goal(run),
+                HostMessage::Ready(false) => run.probing = false,
                 HostMessage::Approval(request) => {
                     let workdir = Path::new(&run.summary.workdir);
                     if let Some(answer) = auto_answer(&self.settings, run.summary.decision.access, &request, workdir) {
@@ -291,6 +334,18 @@ impl Orchestrator {
                         asked_at: Utc::now(),
                     });
                 }
+            }
+        }
+
+        // Keep asking runs that are still connecting, and stop waiting on slow connections.
+        for run in self.runs.iter_mut().filter(|r| r.waiting_goal.is_some() && r.child.is_some()) {
+            if run.started.elapsed() > CONNECT_TIMEOUT {
+                release_goal(run);
+            } else if !run.probing {
+                if let Some(probe) = run.agent.readiness_probe() {
+                    write_line(run, &probe);
+                }
+                run.probing = true;
             }
         }
 
@@ -394,9 +449,22 @@ fn auto_answer(settings: &Settings, access: Access, request: &ApprovalRequest, w
 
 fn send(run: &mut Run, request: &ApprovalRequest, answer: &Answer) {
     let line = run.agent.reply(request, answer);
+    write_line(run, &line);
+}
+
+/// Hands a waiting run its goal.
+fn release_goal(run: &mut Run) {
+    let Some(goal) = run.waiting_goal.take() else { return };
+    write_line(run, &goal);
+    if run.summary.status == RunStatus::Starting {
+        run.summary.status = RunStatus::Running;
+    }
+}
+
+fn write_line(run: &mut Run, line: &str) {
     let Some(stdin) = &mut run.stdin else { return };
     if let Err(err) = writeln!(stdin, "{line}").and_then(|_| stdin.flush()) {
-        eprintln!("mission-control: could not answer run {}: {err}", run.summary.id);
+        eprintln!("mission-control: could not write to run {}: {err}", run.summary.id);
     }
 }
 
@@ -442,6 +510,8 @@ mod tests {
     /// Stands in for a real CLI with `rustc`, which is always present where tests run.
     struct FakeAgent {
         args: Vec<String>,
+        /// Acts like an agent that must connect to apps before taking its goal.
+        connects_first: bool,
     }
 
     impl Agent for FakeAgent {
@@ -459,7 +529,10 @@ mod tests {
             cmd.current_dir(launch.workdir).args(&self.args);
             cmd
         }
-        fn goal_message(&self, _goal: &str) -> String {
+        fn readiness_probe(&self) -> Option<String> {
+            self.connects_first.then(|| "// are you ready?".into())
+        }
+        fn goal_message(&self, _goal: &str, _attachments: &[PathBuf]) -> String {
             "fn main() {}".into()
         }
         fn parse(&self, _line: &str) -> Option<HostMessage> {
@@ -475,13 +548,17 @@ mod tests {
     const WAITS_FOR_STDIN: &[&str] = &["-", "--emit=metadata", "--crate-name", "mc_fake"];
 
     fn orchestrator(args: &[&str]) -> (Orchestrator, PathBuf) {
+        orchestrator_with(args, false)
+    }
+
+    fn orchestrator_with(args: &[&str], connects_first: bool) -> (Orchestrator, PathBuf) {
         let root = std::env::temp_dir().join(format!("mc-test-{}", uuid::Uuid::new_v4()));
         let config = RuntimeConfig {
             runs_dir: root.join("runs"),
             scratch_dir: root.join("scratch"),
             settings_path: root.join("settings.json"),
         };
-        let agent = FakeAgent { args: args.iter().map(|a| a.to_string()).collect() };
+        let agent = FakeAgent { args: args.iter().map(|a| a.to_string()).collect(), connects_first };
         (Orchestrator::new(config, vec![Arc::new(agent)]), root)
     }
 
@@ -502,6 +579,7 @@ mod tests {
         let request = ApprovalRequest {
             request_id: request_id.into(),
             tool: "Bash".into(),
+            label: "Bash".into(),
             detail: "npm install".into(),
             description: None,
             input: serde_json::Value::Null,
@@ -512,7 +590,7 @@ mod tests {
     #[test]
     fn a_run_is_tracked_until_it_exits() {
         let (mut orch, root) = orchestrator(&["--version"]);
-        let run = orch.start("Add a logout button", None).unwrap();
+        let run = orch.start("Add a logout button", None, &[]).unwrap();
         assert_eq!(run.status, RunStatus::Running);
         assert_eq!(run.workdir, root.join("scratch").display().to_string());
 
@@ -525,7 +603,7 @@ mod tests {
     #[test]
     fn a_failing_agent_marks_the_run_failed() {
         let (mut orch, root) = orchestrator(&["--no-such-flag"]);
-        orch.start("Add a logout button", None).unwrap();
+        orch.start("Add a logout button", None, &[]).unwrap();
         assert_eq!(wait_for_exit(&mut orch).status, RunStatus::Failed);
         let _ = fs::remove_dir_all(root);
     }
@@ -533,7 +611,7 @@ mod tests {
     #[test]
     fn requests_wait_for_an_answer_and_finishing_lets_the_agent_exit() {
         let (mut orch, root) = orchestrator(WAITS_FOR_STDIN);
-        let run = orch.start("Add a logout button", None).unwrap();
+        let run = orch.start("Add a logout button", None, &[]).unwrap();
 
         ask(&orch, &run.id, "r1");
         orch.poll();
@@ -548,15 +626,16 @@ mod tests {
         // Still waiting on stdin, so still running, until the agent reports it is done.
         orch.poll();
         assert_eq!(orch.runs()[0].status, RunStatus::Running);
-        orch.outbox.send((run.id.clone(), HostMessage::Finished)).unwrap();
-        assert_eq!(wait_for_exit(&mut orch).status, RunStatus::Finished);
+        orch.outbox.send((run.id.clone(), HostMessage::Finished(Some("done".into())))).unwrap();
+        let done = wait_for_exit(&mut orch);
+        assert_eq!((done.status, done.result.as_deref()), (RunStatus::Finished, Some("done")));
         let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn read_only_runs_are_refused_without_asking() {
         let (mut orch, root) = orchestrator(WAITS_FOR_STDIN);
-        let run = orch.start("What is in this folder?", None).unwrap();
+        let run = orch.start("What is in this folder?", None, &[]).unwrap();
         assert_eq!(run.decision.access, Access::ReadOnly);
         ask(&orch, &run.id, "r1");
         orch.poll();
@@ -569,8 +648,8 @@ mod tests {
     #[test]
     fn goals_no_agent_can_do_are_refused() {
         let (mut orch, _) = orchestrator(&["--version"]);
-        assert!(matches!(orch.start("Open YouTube and play lofi", None), Err(StartError::NoAgent(_))));
-        assert!(matches!(orch.start("  ", None), Err(StartError::EmptyGoal)));
+        assert!(matches!(orch.start("Open YouTube and play lofi", None, &[]), Err(StartError::NoAgent(_))));
+        assert!(matches!(orch.start("  ", None, &[]), Err(StartError::EmptyGoal)));
         assert!(orch.runs().is_empty());
     }
 
@@ -583,7 +662,7 @@ mod tests {
     #[test]
     fn command_centre_rules_answer_requests_without_asking() {
         let (mut orch, root) = orchestrator(WAITS_FOR_STDIN);
-        let run = orch.start("Add a logout button", None).unwrap();
+        let run = orch.start("Add a logout button", None, &[]).unwrap();
 
         set(&mut orch, |s| s.auto_approve = vec!["npm install".into()]);
         ask(&orch, &run.id, "listed");
@@ -612,7 +691,7 @@ mod tests {
             s.full_autonomy = true;
             s.read_only_mode = true;
         });
-        let run = orch.start("Add a logout button", None).unwrap();
+        let run = orch.start("Add a logout button", None, &[]).unwrap();
         assert_eq!(run.decision.access, Access::ReadOnly);
         assert!(run.decision.reason.contains("read-only mode"));
 
@@ -628,17 +707,17 @@ mod tests {
         let (mut orch, root) = orchestrator(&["--version"]);
 
         set(&mut orch, |s| s.max_tier = Tier::Fast);
-        let run = orch.start("Refactor the auth module", None).unwrap();
+        let run = orch.start("Refactor the auth module", None, &[]).unwrap();
         assert_eq!(run.decision.tier, Tier::Fast);
         assert!(run.decision.reason.contains("Capped"));
 
         set(&mut orch, |s| s.allowed_folders = vec![root.join("scratch")]);
         let elsewhere = std::env::temp_dir();
-        assert!(matches!(orch.start("Add a button", Some(&elsewhere)), Err(StartError::FolderNotAllowed(_))));
-        assert!(orch.start("Add a button", None).is_ok(), "the scratch folder is always allowed");
+        assert!(matches!(orch.start("Add a button", Some(&elsewhere), &[]), Err(StartError::FolderNotAllowed(_))));
+        assert!(orch.start("Add a button", None, &[]).is_ok(), "the scratch folder is always allowed");
 
         set(&mut orch, |s| s.claude_enabled = false);
-        assert!(matches!(orch.start("Add a button", None), Err(StartError::NoAgent(_))));
+        assert!(matches!(orch.start("Add a button", None, &[]), Err(StartError::NoAgent(_))));
 
         let saved = Settings::load(&root.join("settings.json"));
         assert!(!saved.claude_enabled && saved.max_tier == Tier::Fast);
@@ -649,6 +728,7 @@ mod tests {
         let request = ApprovalRequest {
             request_id: request_id.into(),
             tool: "Bash".into(),
+            label: "Bash".into(),
             detail: command.into(),
             description: None,
             input: serde_json::json!({ "command": command }),
@@ -665,7 +745,7 @@ mod tests {
             Command::new("git").current_dir(&repo).args(["checkout", "-q", "-b", branch]).output().unwrap();
         };
         switch("main");
-        let run = orch.start("Add a logout button", Some(&repo)).unwrap();
+        let run = orch.start("Add a logout button", Some(&repo), &[]).unwrap();
         let pending = |orch: &Orchestrator| orch.approvals().into_iter().map(|a| a.request.request_id).collect::<Vec<_>>();
 
         set(&mut orch, |s| {
@@ -693,6 +773,38 @@ mod tests {
         assert_eq!(pending(&orch), ["commit on main"]);
 
         orch.cancel(&run.id);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_run_that_connects_to_apps_gets_its_goal_once_they_are_ready() {
+        let (mut orch, root) = orchestrator_with(WAITS_FOR_STDIN, true);
+        let run = orch.start("Add a logout button", None, &[]).unwrap();
+        assert_eq!(run.status, RunStatus::Starting);
+
+        orch.outbox.send((run.id.clone(), HostMessage::Ready(false))).unwrap();
+        orch.poll();
+        assert_eq!(orch.runs()[0].status, RunStatus::Starting, "still connecting");
+
+        orch.outbox.send((run.id.clone(), HostMessage::Ready(true))).unwrap();
+        orch.poll();
+        assert_eq!(orch.runs()[0].status, RunStatus::Running);
+
+        // The fake compiles what it was sent, so it only succeeds if the goal arrived.
+        orch.outbox.send((run.id.clone(), HostMessage::Finished(Some("done".into())))).unwrap();
+        let done = wait_for_exit(&mut orch);
+        assert_eq!((done.status, done.result.as_deref()), (RunStatus::Finished, Some("done")));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn attachments_must_exist_and_the_assistant_can_be_switched_off() {
+        let (mut orch, root) = orchestrator(&["--version"]);
+        let missing = root.join("nope.pdf");
+        assert!(matches!(orch.start("Summarise this", None, &[missing]), Err(StartError::MissingAttachment(_))));
+
+        set(&mut orch, |s| s.assistant_enabled = false);
+        assert!(matches!(orch.start("Create a Notion page", None, &[]), Err(StartError::NoAgent(_))));
         let _ = fs::remove_dir_all(root);
     }
 }

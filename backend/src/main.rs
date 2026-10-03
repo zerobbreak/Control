@@ -2,8 +2,9 @@
 //!
 //! - `backend` prints a summary of every recent Claude Code and Gemini CLI session.
 //! - `backend --follow` streams every event as JSON.
-//! - `backend run "<goal>" [--in <folder>]` routes the goal, starts an agent on it and follows
-//!   that run until the agent exits, asking on the terminal whenever the agent needs permission.
+//! - `backend run "<goal>" [--in <folder>] [--attach <file>]...` routes the goal, starts an agent
+//!   on it and follows that run until the agent exits, asking on the terminal whenever the agent
+//!   needs permission.
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -11,7 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use mission_control::{
-    Answer, Board, ClaudeCode, EventKind, Orchestrator, RunStatus, RuntimeConfig, TranscriptWatcher, WatcherConfig,
+    Answer, Board, ClaudeAssistant, ClaudeCode, EventKind, Orchestrator, RunStatus, RuntimeConfig, TranscriptWatcher, WatcherConfig,
 };
 
 fn main() {
@@ -54,21 +55,23 @@ fn watch(config: WatcherConfig, follow: bool) {
 fn run(config: WatcherConfig, args: &[String]) {
     let mut goal = None;
     let mut folder = None;
+    let mut attachments = Vec::new();
     let mut rest = args.iter();
     while let Some(arg) = rest.next() {
         match arg.as_str() {
             "--in" => folder = rest.next().map(PathBuf::from),
+            "--attach" => attachments.extend(rest.next().map(PathBuf::from)),
             _ => goal = Some(arg.clone()),
         }
     }
     let Some(goal) = goal else {
-        eprintln!("usage: backend run \"<goal>\" [--in <folder>]");
+        eprintln!("usage: backend run \"<goal>\" [--in <folder>] [--attach <file>]...");
         std::process::exit(2);
     };
 
     let runtime = RuntimeConfig::from_home().expect("could not find the home directory");
-    let mut orchestrator = Orchestrator::new(runtime, vec![Arc::new(ClaudeCode)]);
-    let run = match orchestrator.start(&goal, folder.as_deref()) {
+    let mut orchestrator = Orchestrator::new(runtime, vec![Arc::new(ClaudeCode), Arc::new(ClaudeAssistant)]);
+    let run = match orchestrator.start(&goal, folder.as_deref(), &attachments) {
         Ok(run) => run,
         Err(err) => {
             eprintln!("not started: {err}");
@@ -79,6 +82,9 @@ fn run(config: WatcherConfig, args: &[String]) {
     println!("why: {}", run.decision.reason);
     println!("in:  {}", run.workdir);
     println!("log: {}\n", run.log_path);
+    if run.status == RunStatus::Starting {
+        println!("  connecting to your apps…");
+    }
 
     // The agent's transcript appears under the run's ID; print what it does as it happens.
     let mut watcher = TranscriptWatcher::new(config);
@@ -98,7 +104,7 @@ fn run(config: WatcherConfig, args: &[String]) {
             if let Some(description) = &request.description {
                 println!("\n  {:?} wants to: {description}", approval.agent);
             }
-            print!("  Allow {} · {}? [y/N] ", request.tool, request.detail);
+            print!("  Allow {} · {}? [y/N] ", request.label, request.detail);
             let _ = std::io::stdout().flush();
             let mut reply = String::new();
             let _ = std::io::stdin().read_line(&mut reply);
@@ -110,8 +116,11 @@ fn run(config: WatcherConfig, args: &[String]) {
             orchestrator.answer(&approval.run_id, &request.request_id, answer);
         }
         let status = orchestrator.runs()[0].status;
-        if !matches!(status, RunStatus::Running | RunStatus::NeedsApproval) {
+        if !matches!(status, RunStatus::Starting | RunStatus::Running | RunStatus::NeedsApproval) {
             let run = &orchestrator.runs()[0];
+            if let Some(result) = &run.result {
+                println!("Result:\n{result}\n");
+            }
             println!("{status:?} (exit code {:?})", run.exit_code);
             std::process::exit(if status == RunStatus::Finished { 0 } else { 1 });
         }

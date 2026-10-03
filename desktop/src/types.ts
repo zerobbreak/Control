@@ -42,9 +42,9 @@ export type BoardSnapshot = {
 
 // Mirrors backend/src/router.rs and backend/src/orchestrator.rs.
 
-export type TaskKind = "code" | "question" | "browse";
+export type TaskKind = "code" | "question" | "browse" | "assistant";
 export type Tier = "fast" | "balanced" | "strongest";
-export type Access = "readOnly" | "editFiles";
+export type Access = "readOnly" | "editFiles" | "useApps";
 
 export type Decision = {
   task: TaskKind;
@@ -53,7 +53,8 @@ export type Decision = {
   reason: string;
 };
 
-export type RunStatus = "running" | "needsApproval" | "finished" | "failed" | "cancelled";
+/** "starting": waiting for the agent's app connections before it gets the goal. */
+export type RunStatus = "starting" | "running" | "needsApproval" | "finished" | "failed" | "cancelled";
 
 /** One goal handed to one agent. `id` is also the agent's sessionId on the board. */
 export type RunSummary = {
@@ -68,6 +69,8 @@ export type RunSummary = {
   startedAt: string;
   endedAt: string | null;
   logPath: string;
+  /** The agent's final answer, in full, once it has finished. */
+  result: string | null;
   /** Requests the Command Centre's rules answered without asking. */
   autoAllowed: number;
   autoDenied: number;
@@ -80,7 +83,9 @@ export type PendingApproval = {
   workdir: string;
   requestId: string;
   tool: string;
-  /** The command, file or URL the tool would act on. */
+  /** The tool as a person would name it, e.g. "Notion · create pages". */
+  label: string;
+  /** The command, file, URL or title the tool would act on. */
   detail: string;
   description: string | null;
   askedAt: string;
@@ -89,6 +94,9 @@ export type PendingApproval = {
 /** Mirrors backend/src/settings.rs: what the user lets Mission Control and its agents do. */
 export type Settings = {
   claudeEnabled: boolean;
+  assistantEnabled: boolean;
+  /** Where new Notion pages go when a goal does not say. */
+  notionParent: string | null;
   watchOtherSessions: boolean;
   maxTier: Tier;
   maxBudgetUsd: number | null;

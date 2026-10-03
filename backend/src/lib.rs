@@ -13,11 +13,11 @@ pub mod router;
 pub mod settings;
 pub mod watcher;
 
-pub use agent::{Agent, Answer, ApprovalRequest, ClaudeCode};
+pub use agent::{Agent, Answer, ApprovalRequest, ClaudeAssistant, ClaudeCode};
 pub use board::{Board, BoardSnapshot, SessionStatus, SessionSummary};
 pub use events::{AgentEvent, AgentKind, EventKind};
 pub use orchestrator::{Orchestrator, PendingApproval, RunStatus, RunSummary, RuntimeConfig, StartError};
-pub use router::{Access, Decision, TaskKind, Tier};
+pub use router::{Access, Context, Decision, TaskKind, Tier};
 pub use git::{GitError, GitRepo, PullRequest, RepoStatus};
 pub use settings::{GitRule, Settings};
 pub use watcher::{TranscriptWatcher, WatcherConfig};

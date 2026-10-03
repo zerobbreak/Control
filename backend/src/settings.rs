@@ -9,14 +9,17 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::events::AgentKind;
-use crate::router::Tier;
+use crate::router::{TaskKind, Tier};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Settings {
-    /// Whether Mission Control may start Claude Code.
+    /// Whether Mission Control may start Claude Code on code and questions about folders.
     pub claude_enabled: bool,
+    /// Whether Mission Control may start the assistant on errands in apps and dropped files.
+    pub assistant_enabled: bool,
+    /// Where new Notion pages go when a goal does not say, such as a page name or link.
+    pub notion_parent: Option<String>,
     /// Whether Mission Control reads transcripts of Claude Code and Gemini CLI sessions it did
     /// not start. Off, only its own runs are watched.
     pub watch_other_sessions: bool,
@@ -61,6 +64,8 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             claude_enabled: true,
+            assistant_enabled: true,
+            notion_parent: None,
             watch_other_sessions: true,
             max_tier: Tier::Strongest,
             max_budget_usd: None,
@@ -107,15 +112,18 @@ impl Settings {
         self.auto_approve = self.auto_approve.iter().map(|c| c.trim().to_string()).filter(|c| !c.is_empty()).collect();
         self.allowed_folders.retain(|f| !f.as_os_str().is_empty());
         self.max_budget_usd = self.max_budget_usd.filter(|usd| usd.is_finite() && *usd > 0.0);
+        self.notion_parent = self.notion_parent.map(|p| p.trim().to_string()).filter(|p| !p.is_empty());
         self.protected_branches =
             self.protected_branches.iter().map(|b| b.trim().to_string()).filter(|b| !b.is_empty()).collect();
         self
     }
 
-    pub fn agent_enabled(&self, agent: AgentKind) -> bool {
-        match agent {
-            AgentKind::Claude => self.claude_enabled,
-            AgentKind::Gemini => false,
+    /// Whether Mission Control may start an agent on this kind of task.
+    pub fn allows_task(&self, task: TaskKind) -> bool {
+        match task {
+            TaskKind::Code | TaskKind::Question => self.claude_enabled,
+            TaskKind::Assistant => self.assistant_enabled,
+            TaskKind::Browse => false,
         }
     }
 

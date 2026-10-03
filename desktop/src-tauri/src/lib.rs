@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use mission_control::{
-    Answer, Board, BoardSnapshot, ClaudeCode, GitError, GitRepo, Orchestrator, PendingApproval, PullRequest, RepoStatus,
+    Answer, Board, BoardSnapshot, ClaudeAssistant, ClaudeCode, GitError, GitRepo, Orchestrator, PendingApproval, PullRequest, RepoStatus,
     RunSummary, RuntimeConfig, Settings, TranscriptWatcher, WatcherConfig,
 };
 use tauri::{Emitter, LogicalSize, Manager, PhysicalPosition, WebviewWindow, WindowEvent};
@@ -19,14 +19,17 @@ fn board_snapshot(board: tauri::State<SharedBoard>) -> BoardSnapshot {
     board.lock().unwrap().snapshot(chrono::Utc::now())
 }
 
-/// Routes the goal and starts an agent on it, in `folder` or Mission Control's scratch folder.
+/// Routes the goal and starts an agent on it, in `folder` or Mission Control's scratch folder,
+/// with any files the user dropped on it.
 #[tauri::command]
 fn start_task(
     orchestrator: tauri::State<SharedOrchestrator>,
     prompt: String,
     folder: Option<PathBuf>,
+    attachments: Option<Vec<PathBuf>>,
 ) -> Result<RunSummary, String> {
-    orchestrator.lock().unwrap().start(&prompt, folder.as_deref()).map_err(|e| e.to_string())
+    let attachments = attachments.unwrap_or_default();
+    orchestrator.lock().unwrap().start(&prompt, folder.as_deref(), &attachments).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -242,7 +245,7 @@ pub fn run() {
         .manage(SharedBoard::default())
         .setup(|app| {
             let runtime = RuntimeConfig::from_home().ok_or("could not find the home directory")?;
-            let orchestrator: SharedOrchestrator = Arc::new(Mutex::new(Orchestrator::new(runtime, vec![Arc::new(ClaudeCode)])));
+            let orchestrator: SharedOrchestrator = Arc::new(Mutex::new(Orchestrator::new(runtime, vec![Arc::new(ClaudeCode), Arc::new(ClaudeAssistant)])));
             app.manage(orchestrator.clone());
             let board = app.state::<SharedBoard>().inner().clone();
             spawn_watcher(app.handle().clone(), board, orchestrator);
