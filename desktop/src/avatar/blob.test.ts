@@ -135,7 +135,7 @@ describe("blobFrame", () => {
   });
 
   it("copes with negative times and big seeds", () => {
-    const roles: AvatarRole[] = ["mc", "code", "web", "desk"];
+    const roles: AvatarRole[] = ["mc", "code", "web", "desk", "assist"];
     for (const role of roles) {
       const frame = blobFrame(ROLE_SHAPE[role], "needs", -3.7, 9999);
       expect(numbers(frame.body).every(Number.isFinite)).toBe(true);

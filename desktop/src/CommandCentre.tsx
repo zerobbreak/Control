@@ -60,9 +60,15 @@ export default function CommandCentre() {
       <Section title="Agents">
         <Toggle
           label="Claude Code"
-          description="Let Mission Control start Claude Code to work on your goals."
+          description="Let Mission Control start Claude Code on code and questions about your folders."
           checked={settings.claudeEnabled}
           onChange={(claudeEnabled) => update({ claudeEnabled })}
+        />
+        <Toggle
+          label="Assistant"
+          description="Errands in your apps and files you drop on the pill, such as turning an assignment into a Notion page. It reads files and uses your claude.ai connectors, but never runs commands or changes files."
+          checked={settings.assistantEnabled}
+          onChange={(assistantEnabled) => update({ assistantEnabled })}
         />
         <Toggle
           label="Watch my other sessions"
@@ -70,6 +76,20 @@ export default function CommandCentre() {
           checked={settings.watchOtherSessions}
           onChange={(watchOtherSessions) => update({ watchOtherSessions })}
         />
+      </Section>
+
+      <Section title="Assistant">
+        <Row
+          label="Where new Notion pages go"
+          description="A page name or link, used when a goal doesn't say. Leave empty and new pages start as private drafts."
+        >
+          <TextSetting
+            value={settings.notionParent}
+            placeholder="Uni Notes"
+            label="Where new Notion pages go"
+            onCommit={(notionParent) => update({ notionParent })}
+          />
+        </Row>
       </Section>
 
       <Section title="Models and spending">
@@ -239,6 +259,29 @@ function GitRuleControl({ label, value, onChange }: { label: string; value: GitR
         </button>
       ))}
     </div>
+  );
+}
+
+/** A free-text setting, saved when the field loses focus or Enter is pressed. */
+function TextSetting(props: { value: string | null; placeholder: string; label: string; onCommit: (text: string | null) => void }) {
+  const [text, setText] = useState(props.value ?? "");
+  useEffect(() => setText(props.value ?? ""), [props.value]);
+
+  function commit() {
+    const next = text.trim() === "" ? null : text.trim();
+    if (next !== props.value) props.onCommit(next);
+  }
+
+  return (
+    <input
+      className="text-setting"
+      value={text}
+      placeholder={props.placeholder}
+      aria-label={props.label}
+      onChange={(e) => setText(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => e.key === "Enter" && commit()}
+    />
   );
 }
 

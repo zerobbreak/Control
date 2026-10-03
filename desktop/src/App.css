@@ -724,3 +724,5 @@ button {
 .del-line { background: color-mix(in srgb, var(--error) 14%, transparent); }
 .hunk-line { color: var(--waiting); }
 .meta-line { color: var(--muted); }
+
+.text-setting { width: 220px; flex: none; }

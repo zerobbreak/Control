@@ -2,12 +2,12 @@
 // calls `blobFrame` once per animation frame and copies the result onto its SVG.
 
 /** The roles an agent can play. Each role has its own blob shape and colour. */
-export type AvatarRole = "mc" | "code" | "web" | "desk";
+export type AvatarRole = "mc" | "code" | "web" | "desk" | "assist";
 
 /** What an avatar is showing, from calmest to most urgent. */
 export type AvatarState = "idle" | "thinking" | "working" | "needs" | "done";
 
-export type ShapeId = "orb" | "squircle" | "flower" | "capsule";
+export type ShapeId = "orb" | "squircle" | "flower" | "capsule" | "clover";
 
 /** Radius of the shape at angle `t`, in SVG coordinates (sin(t) = -1 is the top). */
 type RadiusFn = (t: number) => number;
@@ -22,6 +22,8 @@ export const SHAPES: Record<ShapeId, RadiusFn> = {
   squircle: superellipse(1, 1, 4.2),
   flower: (t) => 0.9 + 0.11 * Math.cos(5 * t + Math.PI / 2),
   capsule: superellipse(1.3, 0.78, 3.2),
+  // Three soft lobes, one on top: the assistant, distinct from the five-petal browser.
+  clover: (t) => 0.9 + 0.1 * Math.cos(3 * t + Math.PI / 2),
 };
 
 /** The blob family: you can tell agents apart by outline alone, without relying on colour. */
@@ -30,6 +32,7 @@ export const ROLE_SHAPE: Record<AvatarRole, ShapeId> = {
   code: "squircle",
   web: "flower",
   desk: "capsule",
+  assist: "clover",
 };
 
 export const ROLE_COLOR: Record<AvatarRole, string> = {
@@ -37,6 +40,7 @@ export const ROLE_COLOR: Record<AvatarRole, string> = {
   code: "#60a5fa",
   web: "#2dd4bf",
   desk: "#f472b6",
+  assist: "#c084fc",
 };
 
 type Motion = { amp: number; speed: number; spin: number; hop: boolean; dim: boolean };

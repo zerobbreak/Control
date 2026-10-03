@@ -21,7 +21,12 @@ export function sessionState(s: SessionSummary): AvatarState {
 
 /** Mission Control's own mood: the most urgent state among its agents. */
 export function leadState(sessions: SessionSummary[]): AvatarState {
-  return sessions.map(sessionState).reduce<AvatarState>((a, b) => (URGENCY.indexOf(b) > URGENCY.indexOf(a) ? b : a), "idle");
+  return mostUrgent(sessions.map(sessionState));
+}
+
+/** The most urgent of several states, or idle when there are none. */
+export function mostUrgent(states: AvatarState[]): AvatarState {
+  return states.reduce<AvatarState>((a, b) => (URGENCY.indexOf(b) > URGENCY.indexOf(a) ? b : a), "idle");
 }
 
 /** Which avatar an agent gets. Claude Code and Gemini CLI both work in a repo, so both are coding agents. */
