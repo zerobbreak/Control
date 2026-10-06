@@ -1,51 +1,39 @@
-// The personal assistant's views: asking permission for a capability, the routing card for a
-// quick browser action, files the assistant suggests removing, and what is playing.
+// The assistant's small cards on the island: asking once for a capability, moving suggested
+// files to the Recycle Bin, and what is playing.
 
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
-import { BlobAvatar } from "./avatar/BlobAvatar";
 import { CAPABILITIES, humanBytes, recycleLabel, sizeFromDetail } from "./capabilities";
+import { Face } from "./Face";
 import { Icon } from "./Icon";
-import { fileName } from "./runs";
-import type { Capability, ContextItem, MediaAction, NowPlaying, Preview, RunSummary } from "./types";
+import type { Capability, ContextItem, MediaAction, NowPlaying, RunSummary } from "./types";
 
 /**
  * Asks once before Mission Control uses a capability on this computer. The answer is saved and
- * can be changed in the Command Centre.
+ * can be changed on the Desk's Boundaries screen; the full lists are in the detail's tooltip.
  */
-export function PermissionCard({ capability, onAnswer }: { capability: Capability; onAnswer: (allowed: boolean) => void }) {
+export function CapabilityCard({ capability, onAnswer }: { capability: Capability; onAnswer: (allowed: boolean) => void }) {
   const copy = CAPABILITIES[capability];
+  const never = copy.never[0];
+  const tooltip = [...copy.does, ...copy.never.map((line) => `Never: ${line}`)].join("\n");
   return (
-    <section className="permission-card" aria-label={`${copy.name}: permission`}>
-      <div className="permission-card-head">
-        <Icon name="shield" size={15} />
-        <strong>{copy.ask}</strong>
+    <section className="card needs" aria-label={`${copy.name}: permission`}>
+      <header className="card-head">
+        <Face state="needs" />
+        <span className="card-tag needs">Mission Control asks · once</span>
+      </header>
+      <div className="card-body">
+        <strong className="card-title">{copy.ask}</strong>
+        <span className="card-detail" title={tooltip}>
+          {copy.does[0]}. Never {never.charAt(0).toLowerCase() + never.slice(1)}.
+        </span>
       </div>
-      <div className="permission-lists">
-        <ul>
-          {copy.does.map((line) => (
-            <li key={line}>
-              <Icon name="check" size={12} className="yes" />
-              {line}
-            </li>
-          ))}
-        </ul>
-        <ul>
-          {copy.never.map((line) => (
-            <li key={line}>
-              <Icon name="x" size={12} className="no" />
-              Never {line.charAt(0).toLowerCase() + line.slice(1)}
-            </li>
-          ))}
-        </ul>
-      </div>
-      <p className="permission-foot">Asked once. Change it any time in the Command Centre.</p>
-      <div className="answer">
-        <button className="deny" onClick={() => onAnswer(false)}>
+      <div className="card-actions">
+        <button className="btn" onClick={() => onAnswer(false)}>
           Don't allow
         </button>
-        <button className="allow" onClick={() => onAnswer(true)}>
+        <button className="btn allow" onClick={() => onAnswer(true)}>
           Allow
         </button>
       </div>
@@ -54,103 +42,65 @@ export function PermissionCard({ capability, onAnswer }: { capability: Capabilit
 }
 
 /** A capability the user said no to, with where to change it. */
-function TurnedOff({ capability }: { capability: Capability }) {
+export function TurnedOff({ capability, onBoundaries }: { capability: Capability; onBoundaries: () => void }) {
   return (
-    <p className="view-note error">
-      {CAPABILITIES[capability].name} is turned off. Turn it on in the Command Centre to use it.
+    <p className="card-error">
+      {CAPABILITIES[capability].name} is turned off.{" "}
+      <button className="text-link" onClick={onBoundaries}>
+        Change in Boundaries
+      </button>
     </p>
   );
 }
 
-type RoutingProps = {
-  goal: string;
-  preview: Preview;
-  starting: boolean;
-  onCapability: (capability: Capability, allowed: boolean) => void;
-  onCancel: () => void;
-  onGo: () => void;
-};
+/** What each suggested path is, with its size, for the Recycle button's label. */
+export function useDescribed(paths: string[]): ContextItem[] {
+  const [items, setItems] = useState<ContextItem[]>([]);
+  const key = paths.join("\n");
+  useEffect(() => {
+    if (paths.length === 0) {
+      setItems([]);
+      return;
+    }
+    invoke<ContextItem[]>("describe_paths", { paths }).then(setItems, () => setItems([]));
+  }, [key]);
+  return items.filter((i) => i.kind !== "missing");
+}
 
-/**
- * A quick action routed to the browser agent: who will do it, with which model, why, and what it
- * may do. Nothing touches Chrome until Go, and Go waits for browser control to be allowed.
- */
-export function RoutingCard({ goal, preview, starting, onCapability, onCancel, onGo }: RoutingProps) {
-  const { capability, capabilityGranted } = preview;
-  const ready = !capability || capabilityGranted === true;
-  return (
-    <div className="review-view routing-view">
-      <div className="review-body">
-        <p className="chat-bubble">{goal}</p>
-
-        <section className="routing-card">
-          <h3 className="section-label">Routing</h3>
-          <div className="routing-who">
-            <BlobAvatar role="web" state="thinking" size={34} />
-            <Icon name="chevron" size={12} className="plan-arrow" />
-            <span className="app-tile chrome">
-              <Icon name="globe" size={15} />
-            </span>
-            <div className="routing-name">
-              <strong>Browser agent in Chrome</strong>
-              <span className="model-chip">{preview.model}</span>
-            </div>
-          </div>
-          <p className="routing-reason">{preview.decision.reason}</p>
-          <div className="routing-access">
-            <span className="access-badge auto">Automatic in Chrome</span>
-            <span>Opens tabs and plays; never signs in, buys or posts</span>
-          </div>
-        </section>
-
-        {capability && capabilityGranted === null && <PermissionCard capability={capability} onAnswer={(allowed) => onCapability(capability, allowed)} />}
-        {capability && capabilityGranted === false && <TurnedOff capability={capability} />}
-      </div>
-
-      <div className="review-actions">
-        <button className="secondary" onClick={onCancel}>
-          Cancel
-        </button>
-        <button className="primary" onClick={onGo} disabled={!ready || starting}>
-          {starting ? "Starting…" : "Go now"}
-        </button>
-      </div>
-    </div>
-  );
+/** The total size of described files, or null when any size is unknown. */
+export function totalBytes(items: ContextItem[]): number | null {
+  const sizes = items.map((i) => sizeFromDetail(i.detail));
+  return sizes.every((s) => s !== null) ? sizes.reduce<number>((a, b) => a + (b ?? 0), 0) : null;
 }
 
 type RecycleProps = {
   run: RunSummary;
-  paths: string[];
+  items: ContextItem[];
+  /** The user's answer for recycling, or null if not asked yet. */
   allowed: boolean | null;
   onCapability: (allowed: boolean) => void;
+  onBoundaries: () => void;
+  onClose: () => void;
 };
 
-type RecycleStage = "idle" | "confirm" | "moving" | "done" | "error";
+type RecycleStage = "confirm" | "moving" | "done" | "error";
 
 /**
- * Files the assistant suggested removing, with their sizes. Moving them to the Recycle Bin needs
- * recycling allowed once, and then each batch confirmed.
+ * Files the assistant suggested removing. Moving them needs recycling allowed once, and then each
+ * batch confirmed; they go to the Recycle Bin, never deleted outright.
  */
-export function RecycleSuggestion({ run, paths, allowed, onCapability }: RecycleProps) {
-  const [items, setItems] = useState<ContextItem[]>([]);
-  const [stage, setStage] = useState<RecycleStage>("idle");
+export function RecycleCard({ run, items, allowed, onCapability, onBoundaries, onClose }: RecycleProps) {
+  const [stage, setStage] = useState<RecycleStage>("confirm");
   const [message, setMessage] = useState("");
+  const count = `${items.length} file${items.length === 1 ? "" : "s"}`;
 
-  useEffect(() => {
-    invoke<ContextItem[]>("describe_paths", { paths }).then(setItems);
-  }, [paths.join("\n")]);
-
-  const present = items.filter((i) => i.kind !== "missing");
-  const sizes = present.map((i) => sizeFromDetail(i.detail));
-  const bytes = sizes.every((s) => s !== null) ? sizes.reduce<number>((a, b) => a + (b ?? 0), 0) : null;
-  const folder = run.attachments.find((a) => paths.some((p) => p.startsWith(a)));
+  if (allowed === null) return <CapabilityCard capability="recycleFiles" onAnswer={onCapability} />;
 
   async function recycle() {
     setStage("moving");
     try {
-      const moved = await invoke<number>("recycle_files", { runId: run.id, paths: present.map((i) => i.path) });
-      setMessage(`Moved ${present.length} file${present.length === 1 ? "" : "s"} · ${humanBytes(moved)} to the Recycle Bin.`);
+      const moved = await invoke<number>("recycle_files", { runId: run.id, paths: items.map((i) => i.path) });
+      setMessage(`Moved ${count} · ${humanBytes(moved)} to the Recycle Bin.`);
       setStage("done");
     } catch (err) {
       setMessage(String(err));
@@ -158,120 +108,89 @@ export function RecycleSuggestion({ run, paths, allowed, onCapability }: Recycle
     }
   }
 
-  if (present.length === 0) return null;
-
+  const bytes = totalBytes(items);
   return (
-    <section className="detail-section recycle">
-      <h3>Suggested to remove</h3>
-      <ul className="recycle-list">
-        {present.map((item) => (
-          <li key={item.path} title={item.path}>
-            <span className={`context-icon ${item.kind}`}>
-              <Icon name={item.kind === "image" ? "image" : "file"} size={15} />
-            </span>
-            <span className="recycle-name">{item.name}</span>
-            <span className="recycle-size">{item.detail.split(" · ").pop()}</span>
-          </li>
-        ))}
-      </ul>
-
-      {stage === "done" ? (
-        <p className="view-note done">{message}</p>
-      ) : allowed === null && stage === "confirm" ? (
-        <PermissionCard capability="recycleFiles" onAnswer={onCapability} />
-      ) : allowed === false ? (
-        <TurnedOff capability="recycleFiles" />
-      ) : stage === "confirm" ? (
-        <div className="recycle-confirm">
-          <span>
-            Move {present.length} file{present.length === 1 ? "" : "s"} to the Recycle Bin? You can restore them from there.
+    <section className="card" aria-label="Suggested to remove">
+      <header className="card-head">
+        <Face state={stage === "done" ? "done" : "idle"} />
+        <span className="card-tag">Suggested to remove</span>
+        {items.length > 0 && (
+          <button className="icon-btn meta" aria-label="Show in Explorer" title="Show in Explorer" onClick={() => revealItemInDir(items[0].path)}>
+            <Icon name="folder" size={13} />
+          </button>
+        )}
+      </header>
+      <div className="card-body">
+        <strong className="card-title">
+          {stage === "done" ? message : `Move ${count}${bytes !== null ? ` · ${humanBytes(bytes)}` : ""} to the Recycle Bin?`}
+        </strong>
+        {stage !== "done" && (
+          <span className="card-detail one-line" title={items.map((i) => i.path).join("\n")}>
+            {items.map((i) => i.name).join(", ")}
           </span>
-          <div className="answer">
-            <button className="deny" onClick={() => setStage("idle")}>
+        )}
+      </div>
+      {allowed === false ? (
+        <TurnedOff capability="recycleFiles" onBoundaries={onBoundaries} />
+      ) : stage === "error" ? (
+        <p className="card-error">{message}</p>
+      ) : stage !== "done" ? (
+        <p className="card-note">You can restore them from the Recycle Bin.</p>
+      ) : null}
+      <div className="card-actions">
+        {stage === "done" ? (
+          <button className="btn" onClick={onClose}>
+            Done
+          </button>
+        ) : (
+          <>
+            <button className="btn" onClick={onClose}>
               Cancel
             </button>
-            <button className="allow" onClick={recycle}>
-              Move
-            </button>
-          </div>
-        </div>
-      ) : (
-        <div className="recycle-actions">
-          <button className="allow" onClick={() => setStage("confirm")} disabled={stage === "moving"}>
-            <Icon name="recycle" size={14} />
-            {stage === "moving" ? "Moving…" : recycleLabel(present.length, bytes)}
-          </button>
-          {folder && (
-            <button className="secondary-button" onClick={() => revealItemInDir(present[0].path)}>
-              Show in Explorer
-            </button>
-          )}
-        </div>
-      )}
-      {stage === "error" && <p className="view-note error">{message}</p>}
-    </section>
-  );
-}
-
-/** What is playing, with play / pause, skip and volume. */
-export function NowPlayingCard({ media, onControl }: { media: NowPlaying; onControl: (action: MediaAction) => void }) {
-  return (
-    <section className="now-playing" aria-label="Now playing">
-      <div className="now-playing-head">
-        <span className="now-playing-art">
-          <Icon name="play" size={16} />
-        </span>
-        <div className="now-playing-text">
-          <strong title={media.title}>{media.title}</strong>
-          <span>
-            {media.playing ? "Playing" : "Paused"} in {media.app}
-            {media.artist ? ` · ${media.artist}` : ""}
-          </span>
-        </div>
-      </div>
-      <div className="now-playing-controls">
-        <button className="round" aria-label="Volume down" onClick={() => onControl("volumeDown")}>
-          <Icon name="volumeDown" size={15} />
-        </button>
-        <button className="round main" aria-label={media.playing ? "Pause" : "Play"} onClick={() => onControl("playPause")}>
-          <Icon name={media.playing ? "pause" : "play"} size={17} />
-        </button>
-        <button className="round" aria-label="Next" onClick={() => onControl("next")}>
-          <Icon name="next" size={15} />
-        </button>
-        <button className="round" aria-label="Volume up" onClick={() => onControl("volumeUp")}>
-          <Icon name="volumeUp" size={15} />
-        </button>
+            {allowed && (
+              <button className="btn primary" onClick={recycle} disabled={stage === "moving"}>
+                {stage === "moving" ? "Moving…" : recycleLabel(items.length, bytes).replace("Recycle", "Move")}
+              </button>
+            )}
+          </>
+        )}
       </div>
     </section>
   );
 }
 
-/** The collapsed pill's line for what is playing: the title and a small level meter. */
-export function NowPlayingFace({ media }: { media: NowPlaying }) {
+/** The collapsed island's line for what is playing: a small level meter, the title and the app. */
+export function NowPlayingLine({ media }: { media: NowPlaying }) {
   return (
-    <span className={`now-playing-face ${media.playing ? "playing" : ""}`} title={`${media.title} · ${media.app}`}>
-      <span className="now-playing-title">{media.title}</span>
+    <span className={`now-playing ${media.playing ? "playing" : ""}`} title={`${media.title}${media.artist ? ` · ${media.artist}` : ""} · ${media.app}`}>
       <span className="bars" aria-hidden="true">
         <span />
         <span />
         <span />
         <span />
       </span>
+      <span className="island-text">{media.title}</span>
+      <span className="island-muted">· {media.app}</span>
     </span>
   );
 }
 
-/** A loose folder's header line, as the design shows it: what it is and that it is only looked at. */
-export function FolderChips({ item, model }: { item: ContextItem; model: string }) {
+/** Play / pause, skip and volume, revealed when the island is hovered or focused. */
+export function MediaControls({ media, onControl }: { media: NowPlaying; onControl: (action: MediaAction) => void }) {
   return (
-    <div className="folder-chips">
-      <span className="chip">Not a project</span>
-      <span className="chip read">Read only</span>
-      <span className="model-chip">{model}</span>
-      <span className="chip-note" title={item.path}>
-        {fileName(item.path)} · {item.detail}
-      </span>
-    </div>
+    <span className="media-controls">
+      <button className="round" aria-label={media.playing ? "Pause" : "Play"} onClick={() => onControl("playPause")}>
+        <Icon name={media.playing ? "pause" : "play"} size={13} />
+      </button>
+      <button className="round" aria-label="Next" onClick={() => onControl("next")}>
+        <Icon name="next" size={13} />
+      </button>
+      <button className="round" aria-label="Volume down" onClick={() => onControl("volumeDown")}>
+        <Icon name="volumeDown" size={13} />
+      </button>
+      <button className="round" aria-label="Volume up" onClick={() => onControl("volumeUp")}>
+        <Icon name="volumeUp" size={13} />
+      </button>
+    </span>
   );
 }

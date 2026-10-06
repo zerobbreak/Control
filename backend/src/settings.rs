@@ -1,4 +1,4 @@
-//! The Command Centre: what the user lets Mission Control and its agents do.
+//! Boundaries: what the user lets Mission Control and its agents do.
 //!
 //! Defaults are the cautious choice; anything riskier is something the user turns on. Every
 //! setting here is enforced by the runtime, not just shown in the UI.

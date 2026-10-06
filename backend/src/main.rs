@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use mission_control::{
-    Answer, Board, ClaudeAssistant, ClaudeCode, EventKind, Orchestrator, RunStatus, RuntimeConfig, TranscriptWatcher, WatcherConfig,
+    Answer, Board, ClaudeAssistant, ClaudeCode, EventKind, ModelRouter, Orchestrator, RunStatus, RuntimeConfig, TranscriptWatcher, WatcherConfig,
 };
 
 fn main() {
@@ -71,7 +71,8 @@ fn run(config: WatcherConfig, args: &[String]) {
 
     let runtime = RuntimeConfig::from_home().expect("could not find the home directory");
     let mut orchestrator = Orchestrator::new(runtime, vec![Arc::new(ClaudeCode), Arc::new(ClaudeAssistant)]);
-    let run = match orchestrator.start(&goal, folder.as_deref(), &attachments) {
+    let decision = ModelRouter::default().route(&goal, folder.as_deref(), &attachments);
+    let run = match orchestrator.start_routed(&goal, folder.as_deref(), &attachments, decision) {
         Ok(run) => run,
         Err(err) => {
             eprintln!("not started: {err}");

@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use mission_control::{
-    App, Answer, Board, Capability, ClaudeBrowser, ContextItem, BoardSnapshot, ClaudeAssistant, ClaudeCode, GitError, GitRepo, Orchestrator, PendingApproval, Preview, PullRequest, RepoStatus,
+    App, Answer, Board, Decision, ModelRouter, Capability, ClaudeBrowser, ContextItem, BoardSnapshot, ClaudeAssistant, ClaudeCode, GitError, GitRepo, Orchestrator, PendingApproval, Preview, PullRequest, RepoStatus,
     RunSummary, RuntimeConfig, Settings, TranscriptWatcher, WatcherConfig,
 };
 use tauri::{Emitter, LogicalSize, Manager, PhysicalPosition, WebviewWindow, WindowEvent};
@@ -19,29 +19,42 @@ fn board_snapshot(board: tauri::State<SharedBoard>) -> BoardSnapshot {
     board.lock().unwrap().snapshot(chrono::Utc::now())
 }
 
+/// Asks the model router which agent a goal is for. It takes a few seconds, so it runs off the UI
+/// thread and before the orchestrator is locked; a goal already planned is answered from its cache.
+async fn route(router: &Arc<ModelRouter>, prompt: &str, folder: &Option<PathBuf>, attachments: &[PathBuf]) -> Result<Decision, String> {
+    let (router, prompt, folder, attachments) = (router.clone(), prompt.to_string(), folder.clone(), attachments.to_vec());
+    tauri::async_runtime::spawn_blocking(move || router.route(&prompt, folder.as_deref(), &attachments))
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// Routes the goal and starts an agent on it, in `folder` or Mission Control's scratch folder,
 /// with any files the user dropped on it.
 #[tauri::command]
-fn start_task(
-    orchestrator: tauri::State<SharedOrchestrator>,
+async fn start_task(
+    orchestrator: tauri::State<'_, SharedOrchestrator>,
+    router: tauri::State<'_, Arc<ModelRouter>>,
     prompt: String,
     folder: Option<PathBuf>,
     attachments: Option<Vec<PathBuf>>,
 ) -> Result<RunSummary, String> {
     let attachments = attachments.unwrap_or_default();
-    orchestrator.lock().unwrap().start(&prompt, folder.as_deref(), &attachments).map_err(|e| e.to_string())
+    let decision = route(&router, &prompt, &folder, &attachments).await?;
+    orchestrator.lock().unwrap().start_routed(&prompt, folder.as_deref(), &attachments, decision).map_err(|e| e.to_string())
 }
 
 /// What `start_task` would do with the same goal, without starting anything, for the user to review.
 #[tauri::command]
-fn preview_task(
-    orchestrator: tauri::State<SharedOrchestrator>,
+async fn preview_task(
+    orchestrator: tauri::State<'_, SharedOrchestrator>,
+    router: tauri::State<'_, Arc<ModelRouter>>,
     prompt: String,
     folder: Option<PathBuf>,
     attachments: Option<Vec<PathBuf>>,
 ) -> Result<Preview, String> {
     let attachments = attachments.unwrap_or_default();
-    orchestrator.lock().unwrap().preview(&prompt, folder.as_deref(), &attachments).map_err(|e| e.to_string())
+    let decision = route(&router, &prompt, &folder, &attachments).await?;
+    orchestrator.lock().unwrap().preview_routed(&prompt, folder.as_deref(), &attachments, decision).map_err(|e| e.to_string())
 }
 
 /// What each dropped or picked path is, for the pill's context list. Reads only file metadata.
@@ -62,7 +75,7 @@ async fn recycle_files(orchestrator: tauri::State<'_, SharedOrchestrator>, run_i
 fn media_allowed(orchestrator: &SharedOrchestrator) -> Result<(), String> {
     match orchestrator.lock().unwrap().settings().capability(Capability::MediaControls) {
         Some(true) => Ok(()),
-        Some(false) => Err("media controls are turned off in the Command Centre".into()),
+        Some(false) => Err("media controls are turned off in Boundaries".into()),
         None => Err("media controls need your permission first".into()),
     }
 }
@@ -100,7 +113,7 @@ fn get_settings(orchestrator: tauri::State<SharedOrchestrator>) -> Settings {
     orchestrator.lock().unwrap().settings().clone()
 }
 
-/// Saves new Command Centre settings and returns them as stored, after clean-up.
+/// Saves new Boundaries settings and returns them as stored, after clean-up.
 #[tauri::command]
 fn update_settings(
     app: tauri::AppHandle,
@@ -247,7 +260,7 @@ fn place_pill(window: &WebviewWindow, width: f64, height: f64) -> tauri::Result<
     Ok(())
 }
 
-/// Brings the dashboard forward, on one of its views ("activity", "changes" or "command") if asked.
+/// Brings the Desk forward, on a view if asked: "today", "changes", "boundaries" or "run:<id>".
 #[tauri::command]
 fn open_dashboard(app: tauri::AppHandle, view: Option<String>) -> Result<(), String> {
     let window = app.get_webview_window("main").ok_or("dashboard window is missing")?;
@@ -265,7 +278,7 @@ fn quit_app(app: tauri::AppHandle) {
 
 /// Tails agent transcripts in the background and pushes a fresh board and run list to the UI on
 /// every poll, so time-based statuses such as "stalled" update even when no new events arrive.
-/// With "watch other sessions" off in the Command Centre, only Mission Control's own runs are read.
+/// With "watch other sessions" off in Boundaries, only Mission Control's own runs are read.
 fn spawn_watcher(app: tauri::AppHandle, board: SharedBoard, orchestrator: SharedOrchestrator) {
     let Some(config) = WatcherConfig::from_home() else {
         eprintln!("mission-control: could not find the home directory; agent monitoring is off");
@@ -317,6 +330,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(SharedBoard::default())
+        .manage(Arc::new(ModelRouter::default()))
         .setup(|app| {
             let runtime = RuntimeConfig::from_home().ok_or("could not find the home directory")?;
             let orchestrator: SharedOrchestrator = Arc::new(Mutex::new(Orchestrator::new(runtime, vec![Arc::new(ClaudeCode), Arc::new(ClaudeAssistant), Arc::new(ClaudeBrowser)])));

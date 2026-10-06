@@ -1,6 +1,6 @@
 //! Turns a goal into a running agent: routes it, picks an agent that can do it, starts the
 //! process, answers or forwards its permission requests and keeps track of it until it exits.
-//! The Command Centre's settings bound every step.
+//! The Boundaries settings bound every step.
 //!
 //! Progress inside a run is not read here. Each run uses a session ID chosen up front, so the
 //! transcript watcher reports its events under that same ID on the board.
@@ -28,7 +28,7 @@ pub struct RuntimeConfig {
     pub runs_dir: PathBuf,
     /// Where goals that are not about any folder run.
     pub scratch_dir: PathBuf,
-    /// The Command Centre's settings.
+    /// The Boundaries settings.
     pub settings_path: PathBuf,
 }
 
@@ -79,7 +79,7 @@ pub struct RunSummary {
     pub connections: Vec<AppConnection>,
     /// The agent's final answer, in full, once it has finished the goal.
     pub result: Option<String>,
-    /// Requests the Command Centre's rules answered without asking.
+    /// Requests the Boundaries rules answered without asking.
     pub auto_allowed: u32,
     pub auto_denied: u32,
 }
@@ -103,7 +103,7 @@ pub enum StartError {
     MissingFolder(PathBuf),
     /// An attached file or folder does not exist.
     MissingAttachment(PathBuf),
-    /// The Command Centre does not allow runs in this folder.
+    /// Boundaries do not allow runs in this folder.
     FolderNotAllowed(PathBuf),
     /// No registered agent can do this kind of task yet.
     NoAgent(Decision),
@@ -111,6 +111,8 @@ pub enum StartError {
     NeedsPermission(Capability),
     /// The task needs a capability the user said no to.
     NotAllowed(Capability),
+    /// Code work needs a project folder to work in; without one it would write into the scratch folder.
+    NeedsProject,
     Spawn(std::io::Error),
 }
 
@@ -121,11 +123,12 @@ impl std::fmt::Display for StartError {
             Self::MissingFolder(path) => write!(f, "{} is not a folder", path.display()),
             Self::MissingAttachment(path) => write!(f, "{} does not exist", path.display()),
             Self::FolderNotAllowed(path) => {
-                write!(f, "the Command Centre does not allow runs in {}", path.display())
+                write!(f, "Boundaries do not allow runs in {}", path.display())
             }
             Self::NoAgent(d) => write!(f, "no enabled agent can handle {:?} tasks", d.task),
             Self::NeedsPermission(c) => write!(f, "{} needs your permission first", capability_name(*c)),
-            Self::NotAllowed(c) => write!(f, "{} is turned off in the Command Centre", capability_name(*c)),
+            Self::NotAllowed(c) => write!(f, "{} is turned off in Boundaries", capability_name(*c)),
+            Self::NeedsProject => write!(f, "code work needs a project: add its folder, then plan again"),
             Self::Spawn(err) => write!(f, "could not start the agent: {err}"),
         }
     }
@@ -138,7 +141,7 @@ const READ_ONLY_REFUSAL: &str =
     "This run is read-only: Mission Control started it to answer a question, not to change anything.";
 const APP_READ_ONLY_REFUSAL: &str =
     "The user lets agents only read this app; Mission Control's Apps & access keeps it to looking. Say what you would have changed instead.";
-const LOCKDOWN_REASON: &str = " Read-only, because read-only mode is on in the Command Centre.";
+const LOCKDOWN_REASON: &str = " Read-only, because read-only mode is on in Boundaries.";
 /// How long a run waits for its app connections before starting without the slow ones.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 
@@ -170,7 +173,7 @@ impl std::fmt::Display for RecycleError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NeedsPermission => write!(f, "recycling files needs your permission first"),
-            Self::NotAllowed => write!(f, "recycling files is turned off in the Command Centre"),
+            Self::NotAllowed => write!(f, "recycling files is turned off in Boundaries"),
             Self::UnknownRun => write!(f, "that run is no longer known"),
             Self::Empty => write!(f, "no files to recycle"),
             Self::Outside(p) => write!(f, "{} is not a file in a folder you handed over", p.display()),
@@ -240,7 +243,7 @@ impl Orchestrator {
         &self.settings
     }
 
-    /// Applies new Command Centre settings to future runs and requests, and saves them.
+    /// Applies new Boundaries settings to future runs and requests, and saves them.
     pub fn update_settings(&mut self, settings: Settings) -> std::io::Result<Settings> {
         let settings = settings.normalized();
         settings.save(&self.config.settings_path)?;
@@ -256,21 +259,33 @@ impl Orchestrator {
     /// What starting `goal` would do, without starting anything: which agent, where, with what
     /// access and why. Fails for the same reasons `start` would.
     pub fn preview(&self, goal: &str, folder: Option<&Path>, attachments: &[PathBuf]) -> Result<Preview, StartError> {
-        let (workdir, decision, agent) = self.plan(goal, folder, attachments)?;
+        self.preview_routed(goal, folder, attachments, keyword_route(goal, folder, attachments))
+    }
+
+    /// `preview` with a decision already made, such as one from the model router.
+    pub fn preview_routed(&self, goal: &str, folder: Option<&Path>, attachments: &[PathBuf], routed: Decision) -> Result<Preview, StartError> {
+        let (workdir, decision, agent) = self.plan(goal, folder, attachments, routed)?;
+        let capability = needed_capability(Some(decision.task));
         Ok(Preview {
             model: agent.model(decision.tier).to_string(),
             decision,
             workdir: workdir.display().to_string(),
             ask_before_edits: self.settings.ask_before_edits,
             full_autonomy: self.settings.full_autonomy,
-            capability: needed_capability(decision_task(&self.settings, goal, folder, attachments)),
-            capability_granted: needed_capability(decision_task(&self.settings, goal, folder, attachments))
-                .and_then(|c| self.settings.capability(c)),
+            capability,
+            capability_granted: capability.and_then(|c| self.settings.capability(c)),
         })
     }
 
-    /// Checks a goal and routes it: the folder it will run in, the decision and the agent.
-    fn plan(&self, goal: &str, folder: Option<&Path>, attachments: &[PathBuf]) -> Result<(PathBuf, Decision, Arc<dyn Agent>), StartError> {
+    /// Checks a goal and its routing: the folder it will run in, the decision within the user's
+    /// limits, and the agent.
+    fn plan(
+        &self,
+        goal: &str,
+        folder: Option<&Path>,
+        attachments: &[PathBuf],
+        routed: Decision,
+    ) -> Result<(PathBuf, Decision, Arc<dyn Agent>), StartError> {
         let goal = goal.trim();
         if goal.is_empty() {
             return Err(StartError::EmptyGoal);
@@ -287,7 +302,10 @@ impl Orchestrator {
             None => self.config.scratch_dir.clone(),
         };
 
-        let decision = bounded(router::route(goal, route_context(folder, attachments)), &self.settings);
+        let decision = bounded(routed, &self.settings);
+        if decision.task == TaskKind::Code && folder.is_none() {
+            return Err(StartError::NeedsProject);
+        }
         if let Some(capability) = needed_capability(Some(decision.task)) {
             if self.settings.capability(capability) == Some(false) {
                 return Err(StartError::NotAllowed(capability));
@@ -305,7 +323,12 @@ impl Orchestrator {
     /// Routes `goal`, starts an agent on it in `folder` (or the scratch folder) with any
     /// `attachments` the user handed over, and returns the run.
     pub fn start(&mut self, goal: &str, folder: Option<&Path>, attachments: &[PathBuf]) -> Result<RunSummary, StartError> {
-        let (workdir, decision, agent) = self.plan(goal, folder, attachments)?;
+        self.start_routed(goal, folder, attachments, keyword_route(goal, folder, attachments))
+    }
+
+    /// `start` with a decision already made, such as the one the user just reviewed.
+    pub fn start_routed(&mut self, goal: &str, folder: Option<&Path>, attachments: &[PathBuf], routed: Decision) -> Result<RunSummary, StartError> {
+        let (workdir, decision, agent) = self.plan(goal, folder, attachments, routed)?;
         // Asking is the pill's job; the runtime only checks the answer.
         if let Some(capability) = needed_capability(Some(decision.task)) {
             if self.settings.capability(capability) != Some(true) {
@@ -529,7 +552,7 @@ impl Drop for Orchestrator {
     }
 }
 
-/// Applies the Command Centre's limits to the router's decision.
+/// Applies the Boundaries limits to the router's decision.
 fn bounded(mut decision: Decision, settings: &Settings) -> Decision {
     if decision.tier > settings.max_tier {
         decision.tier = settings.max_tier;
@@ -538,7 +561,7 @@ fn bounded(mut decision: Decision, settings: &Settings) -> Decision {
             Tier::Balanced => "balanced",
             Tier::Strongest => "strongest",
         };
-        decision.reason.push_str(&format!(" Capped at the {name} model in the Command Centre."));
+        decision.reason.push_str(&format!(" Capped at the {name} model in Boundaries."));
         if decision.task == TaskKind::Assistant && decision.tier == Tier::Fast {
             decision.reason.push_str(" The fast model can't hold your connected apps, so it works from the files only.");
         }
@@ -550,18 +573,18 @@ fn bounded(mut decision: Decision, settings: &Settings) -> Decision {
     decision
 }
 
+/// The keyword router's decision, used when no other router has decided.
+pub fn keyword_route(goal: &str, folder: Option<&Path>, attachments: &[PathBuf]) -> Decision {
+    router::route(goal.trim(), route_context(folder, attachments))
+}
+
 /// What the router sees in what came with a goal.
-fn route_context(folder: Option<&Path>, attachments: &[PathBuf]) -> router::Context {
+pub fn route_context(folder: Option<&Path>, attachments: &[PathBuf]) -> router::Context {
     router::Context {
         folder: folder.is_some(),
         attachments: !attachments.is_empty(),
         loose_folder: attachments.iter().any(|a| a.is_dir() && !crate::context::is_project(a)),
     }
-}
-
-/// The task a goal routes to, for previews.
-fn decision_task(settings: &Settings, goal: &str, folder: Option<&Path>, attachments: &[PathBuf]) -> Option<TaskKind> {
-    Some(bounded(router::route(goal.trim(), route_context(folder, attachments)), settings).task)
 }
 
 /// The capability a kind of task needs the user's permission for.
@@ -577,7 +600,7 @@ pub fn capability_name(capability: Capability) -> &'static str {
     }
 }
 
-/// The answer the Command Centre's rules give a request without asking, if any.
+/// The answer the Boundaries rules give a request without asking, if any.
 ///
 /// A run's read-only access is Mission Control's promise to the user, so it is enforced here
 /// rather than trusted to the agent's own permission mode, and it outranks everything else.
@@ -602,7 +625,7 @@ fn auto_answer(settings: &Settings, access: Access, request: &ApprovalRequest, w
         };
         if rule == GitRule::Never {
             return Some(Answer::Deny(format!(
-                "{what} is turned off for agents in Mission Control's Command Centre. Leave it to the user."
+                "{what} is turned off for agents in Mission Control's Boundaries. Leave it to the user."
             )));
         }
         let branch = GitRepo::open(workdir).ok().and_then(|repo| repo.current_branch());
@@ -726,6 +749,8 @@ mod tests {
 
     fn orchestrator_with(args: &[&str], connects_first: bool) -> (Orchestrator, PathBuf) {
         let root = std::env::temp_dir().join(format!("mc-test-{}", uuid::Uuid::new_v4()));
+        // Doubles as a project folder for code goals.
+        fs::create_dir_all(&root).unwrap();
         let config = RuntimeConfig {
             runs_dir: root.join("runs"),
             scratch_dir: root.join("scratch"),
@@ -808,7 +833,7 @@ mod tests {
     #[test]
     fn read_only_runs_are_refused_without_asking() {
         let (mut orch, root) = orchestrator(WAITS_FOR_STDIN);
-        let run = orch.start("What is in this folder?", None, &[]).unwrap();
+        let run = orch.start("What is in this folder?", Some(&root), &[]).unwrap();
         assert_eq!(run.decision.access, Access::ReadOnly);
         ask(&orch, &run.id, "r1");
         orch.poll();
@@ -886,11 +911,21 @@ mod tests {
 
     #[test]
     fn goals_no_agent_can_do_are_refused() {
-        let (mut orch, _) = orchestrator(&["--version"]);
+        let (mut orch, root) = orchestrator(&["--version"]);
         set(&mut orch, |s| s.claude_enabled = false);
-        assert!(matches!(orch.start("Add a button", None, &[]), Err(StartError::NoAgent(_))));
+        assert!(matches!(orch.start("Add a button", Some(&root), &[]), Err(StartError::NoAgent(_))));
         assert!(matches!(orch.start("  ", None, &[]), Err(StartError::EmptyGoal)));
         assert!(orch.runs().is_empty());
+    }
+
+    #[test]
+    fn code_work_waits_for_a_project() {
+        let (mut orch, root) = orchestrator(&["--version"]);
+        assert!(matches!(orch.start("Fix the bug in the login", None, &[]), Err(StartError::NeedsProject)));
+        assert!(matches!(orch.preview("Fix the bug in the login", None, &[]), Err(StartError::NeedsProject)));
+        assert_eq!(orch.preview("play jcole", None, &[]).unwrap().decision.task, TaskKind::Browse);
+        assert!(orch.runs().is_empty());
+        let _ = fs::remove_dir_all(root);
     }
 
     fn set(orch: &mut Orchestrator, change: impl FnOnce(&mut Settings)) {
@@ -947,17 +982,17 @@ mod tests {
         let (mut orch, root) = orchestrator(&["--version"]);
 
         set(&mut orch, |s| s.max_tier = Tier::Fast);
-        let run = orch.start("Refactor the auth module", None, &[]).unwrap();
+        let run = orch.start("Refactor the auth module", Some(&root), &[]).unwrap();
         assert_eq!(run.decision.tier, Tier::Fast);
         assert!(run.decision.reason.contains("Capped"));
 
         set(&mut orch, |s| s.allowed_folders = vec![root.join("scratch")]);
         let elsewhere = std::env::temp_dir();
         assert!(matches!(orch.start("Add a button", Some(&elsewhere), &[]), Err(StartError::FolderNotAllowed(_))));
-        assert!(orch.start("Add a button", None, &[]).is_ok(), "the scratch folder is always allowed");
+        assert!(orch.start("Plan my week", None, &[]).is_ok(), "the scratch folder is always allowed");
 
         set(&mut orch, |s| s.claude_enabled = false);
-        assert!(matches!(orch.start("Add a button", None, &[]), Err(StartError::NoAgent(_))));
+        assert!(matches!(orch.start("Add a button", Some(&root.join("scratch")), &[]), Err(StartError::NoAgent(_))));
 
         let saved = Settings::load(&root.join("settings.json"));
         assert!(!saved.claude_enabled && saved.max_tier == Tier::Fast);

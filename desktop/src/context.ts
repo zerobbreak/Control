@@ -93,7 +93,7 @@ const AGENT: Record<TaskKind, { role: AvatarRole; name: string }> = {
   assistant: { role: "assist", name: "Assistant" },
 };
 
-/** What the run may do without asking, from its access and the Command Centre's rules. */
+/** What the run may do without asking, from its access and the Boundaries rules. */
 export function accessBadge(preview: Preview): AccessBadge {
   const { access } = preview.decision;
   if (access === "readOnly") return { label: "Read only", tone: "read" };

@@ -3,7 +3,7 @@
 
 import type { Capability } from "./types";
 
-/** What the user is asked, and told, about a capability. The pill and the Command Centre share it. */
+/** What the user is asked, and told, about a capability. The pill and Boundaries share it. */
 export type CapabilityCopy = {
   name: string;
   /** The question on the permission card. */

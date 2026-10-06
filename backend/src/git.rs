@@ -2,7 +2,7 @@
 //! pull, branch and open pull requests. Uses the installed `git` and `gh` CLIs, so the user's
 //! existing credentials, SSH keys and GitHub login apply and nothing new stores secrets.
 //!
-//! Also classifies agents' shell commands, so the Command Centre can rule on git actions.
+//! Also classifies agents' shell commands, so Boundaries can rule on git actions.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -247,7 +247,7 @@ impl GitRepo {
     }
 }
 
-/// What a shell command would do in git or on GitHub, for the Command Centre's rules.
+/// What a shell command would do in git or on GitHub, for the Boundaries rules.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum GitAction {
     Commit,

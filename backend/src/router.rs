@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum TaskKind {
     /// Change code or files in a folder.
@@ -62,6 +62,13 @@ pub struct Context {
 /// "Open YouTube…" is a browser task; "fix the login and test it in the browser" is code work.
 const BROWSE_START: [&str; 5] = ["open ", "go to ", "play ", "search ", "watch "];
 const WEB: [&str; 5] = ["youtube", "browser", "website", "chrome", ".com"];
+/// Without a project, "play J. Cole" is music, not code.
+const MEDIA_START: [&str; 6] = ["play ", "listen to ", "put on ", "watch ", "queue ", "stream "];
+/// Words that make a goal code work even before a project has been handed over.
+const CODE: [&str; 16] = [
+    "code", "bug", "refactor", "function", "compile", "commit", "repo", "branch", "merge", "endpoint",
+    "component", "unit test", "typo", "readme", "deploy", "lint",
+];
 const QUESTION_START: [&str; 9] = ["what", "which", "where", "why", "how", "who", "is ", "are ", "does "];
 const HARD: [&str; 7] = ["architect", "design", "refactor", "investigate", "debug", "migrate", "rewrite"];
 const SMALL: [&str; 6] = ["typo", "rename", "small", "quick", "one line", "comment"];
@@ -82,6 +89,14 @@ pub fn route(goal: &str, context: Context) -> Decision {
             // The browser agent acts only in Chrome; it never touches files or runs commands.
             access: Access::ReadOnly,
             reason: "A quick browser action in Chrome. No code or files, so a fast model is enough.".into(),
+        };
+    }
+    if !context.folder && MEDIA_START.iter().any(|w| text.starts_with(w)) {
+        return Decision {
+            task: TaskKind::Browse,
+            tier: Tier::Fast,
+            access: Access::ReadOnly,
+            reason: "Something to play, so the browser agent finds it in Chrome. A fast model is enough.".into(),
         };
     }
     // In a project folder, "add Notion sync" is code work; outside one it is an errand in Notion.
@@ -108,6 +123,16 @@ pub fn route(goal: &str, context: Context) -> Decision {
                 "About the files you handed over, so the assistant: it reads them and changes nothing on this computer."
             }
             .into(),
+        };
+    }
+    // Without a project and without talk of code, it is a personal errand or question, never code.
+    if !context.folder && !has(&CODE) {
+        return Decision {
+            task: TaskKind::Assistant,
+            tier: Tier::Balanced,
+            access: Access::UseApps,
+            reason: "A personal question or errand, so the assistant: it changes nothing on this computer and asks before creating or sending anything."
+                .into(),
         };
     }
     if question {
@@ -167,17 +192,35 @@ mod tests {
     }
 
     #[test]
+    fn personal_goals_never_become_code() {
+        let d = route("play jcole");
+        assert_eq!((d.task, d.access), (TaskKind::Browse, Access::ReadOnly));
+        assert_eq!(route("Put on some Drake").task, TaskKind::Browse);
+        assert_eq!(route("Listen to lofi").task, TaskKind::Browse);
+        assert_eq!(route("Remind me what's due this week").task, TaskKind::Assistant);
+        assert_eq!(route("What should I cook tonight?").task, TaskKind::Assistant);
+        assert_eq!(route("Plan my week").access, Access::UseApps);
+    }
+
+    #[test]
+    fn code_words_mean_code_work_even_without_a_project() {
+        assert_eq!(route("Fix the bug in the login").task, TaskKind::Code);
+        assert_eq!(super::route("Fix the login", IN_PROJECT).task, TaskKind::Code);
+        assert_eq!(super::route("play the intro animation on load", IN_PROJECT).task, TaskKind::Code);
+    }
+
+    #[test]
     fn questions_are_read_only_and_fast() {
-        let d = route("What's taking up the most space in this folder?");
+        let d = super::route("What's taking up the most space in this folder?", IN_PROJECT);
         assert_eq!((d.task, d.tier, d.access), (TaskKind::Question, Tier::Fast, Access::ReadOnly));
     }
 
     #[test]
     fn code_work_scales_the_model_with_the_job() {
-        assert_eq!(route("Fix the typo in the README").tier, Tier::Fast);
-        assert_eq!(route("Add a logout button to the header").tier, Tier::Balanced);
-        assert_eq!(route("Refactor the auth module into services").tier, Tier::Strongest);
-        assert_eq!(route("Add a logout button").access, Access::EditFiles);
+        assert_eq!(super::route("Fix the typo in the README", IN_PROJECT).tier, Tier::Fast);
+        assert_eq!(super::route("Add a logout button to the header", IN_PROJECT).tier, Tier::Balanced);
+        assert_eq!(super::route("Refactor the auth module into services", IN_PROJECT).tier, Tier::Strongest);
+        assert_eq!(super::route("Add a logout button", IN_PROJECT).access, Access::EditFiles);
     }
 
     #[test]
@@ -185,7 +228,7 @@ mod tests {
         let d = route("Open YouTube and play lofi beats");
         assert_eq!((d.task, d.tier, d.access), (TaskKind::Browse, Tier::Fast, Access::ReadOnly));
         assert_eq!(route("Go to github.com and star the repo").task, TaskKind::Browse);
-        assert_eq!(route("Fix the login and test it in the browser").task, TaskKind::Code);
-        assert_eq!(route("Add a display name field").task, TaskKind::Code);
+        assert_eq!(super::route("Fix the login and test it in the browser", IN_PROJECT).task, TaskKind::Code);
+        assert_eq!(super::route("Add a display name field", IN_PROJECT).task, TaskKind::Code);
     }
 }

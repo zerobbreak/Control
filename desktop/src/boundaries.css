@@ -1,0 +1,572 @@
+/* Boundaries: what agents may do without asking. Self-contained; uses theme.css tokens. */
+
+.bd {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: calc(860px + 2 * clamp(20px, 4vw, 56px));
+  margin: 0 auto;
+  padding: 32px clamp(20px, 4vw, 56px) 64px;
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+  color: var(--text);
+  font-family: var(--font);
+}
+
+.bd *,
+.bd *::before,
+.bd *::after {
+  box-sizing: border-box;
+}
+
+.bd button,
+.bd input {
+  font: inherit;
+  color: inherit;
+}
+
+.bd button {
+  cursor: pointer;
+}
+
+.bd button:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.bd :focus-visible {
+  outline: 2px solid var(--working);
+  outline-offset: 2px;
+}
+
+/* Header */
+
+.bd-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px 16px;
+}
+
+.bd-intro {
+  flex: 1 1 420px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.bd-intro h1 {
+  margin: 0;
+  font-size: 30px;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+}
+
+.bd-intro p {
+  margin: 0;
+  font-size: 15px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+
+.bd-save {
+  min-height: 20px;
+  padding-top: 10px;
+  font-size: 13px;
+  color: var(--faint);
+}
+
+.bd-save.saved { color: var(--done); }
+.bd-save.error { color: var(--failed-ink); max-width: 100%; overflow-wrap: anywhere; }
+
+/* Sections */
+
+.bd-section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  scroll-margin-top: 24px;
+}
+
+.bd-section-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  min-height: 28px;
+}
+
+.bd-section-head h2 {
+  margin: 0;
+}
+
+.bd-hint {
+  margin: -4px 0 0;
+  font-size: 13px;
+  color: var(--faint);
+}
+
+.bd-card {
+  display: flex;
+  flex-direction: column;
+  border-radius: var(--radius-l);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  overflow: hidden;
+}
+
+.bd-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px 20px;
+  padding: 16px 18px;
+  margin: 0;
+}
+
+.bd-row + .bd-row {
+  border-top: 1px solid var(--line);
+}
+
+.bd-text {
+  flex: 1 1 320px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.bd-text.app {
+  flex-basis: 200px;
+  gap: 2px;
+}
+
+.bd-text.wide {
+  gap: 6px;
+}
+
+.bd-label {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.bd-label label {
+  cursor: pointer;
+}
+
+.bd-sub {
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--faint);
+}
+
+.bd-glyph {
+  display: inline-flex;
+  justify-content: center;
+  width: 22px;
+}
+
+.bd-desc {
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--muted);
+}
+
+.bd-desc.needs { color: var(--needs-ink); }
+.bd-desc.failed { color: var(--failed-ink); }
+
+.bd-note {
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.bd-note.error {
+  color: var(--failed-ink);
+  overflow-wrap: anywhere;
+}
+
+.bd-control {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.bd-unasked {
+  font-size: 12px;
+  color: var(--faint);
+}
+
+/* Autonomy levels */
+
+.bd-levels {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 10px;
+}
+
+.bd-level {
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 16px;
+  border-radius: var(--radius-l);
+  border: 1px solid var(--line-strong);
+  background: var(--surface);
+}
+
+.bd-level:hover {
+  background: var(--surface-2);
+}
+
+.bd-level[aria-pressed="true"] {
+  border-color: var(--text);
+  background: var(--surface-3);
+}
+
+.bd-level-title {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.bd-level-text {
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--muted);
+}
+
+.bd-level[aria-pressed="true"] .bd-level-text {
+  color: var(--text-2);
+}
+
+/* Full autonomy is the one choice drawn in red, before and after it is chosen. */
+.bd-level.full {
+  border-color: color-mix(in srgb, var(--failed) 30%, var(--line-strong));
+}
+
+.bd-level.full .bd-level-title {
+  color: var(--failed-ink);
+}
+
+.bd-level.full[aria-pressed="true"] {
+  border-color: var(--failed);
+  background: color-mix(in srgb, var(--failed-bg) 60%, var(--surface));
+}
+
+.bd-confirm {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px 20px;
+  padding: 16px 18px;
+  border-radius: var(--radius-l);
+  border: 1px solid color-mix(in srgb, var(--failed) 45%, var(--line-strong));
+  background: color-mix(in srgb, var(--failed-bg) 55%, var(--surface));
+}
+
+.bd-confirm > div:first-child {
+  flex: 1 1 320px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.bd-confirm strong {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--failed-ink);
+}
+
+.bd-confirm p {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-2);
+}
+
+.bd-confirm-actions {
+  display: flex;
+  gap: 8px;
+}
+
+/* Buttons */
+
+.bd-btn {
+  height: 36px;
+  padding: 0 14px;
+  border-radius: var(--radius-m);
+  border: 1px solid var(--line-strong);
+  background: transparent;
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.bd-btn:hover:not(:disabled) {
+  background: var(--surface-2);
+}
+
+.bd-btn.danger {
+  border-color: transparent;
+  background: var(--failed);
+  color: var(--bg);
+  font-weight: 600;
+}
+
+.bd-btn.danger:hover:not(:disabled) {
+  background: var(--failed-ink);
+}
+
+.bd-btn.needs {
+  border-color: transparent;
+  background: var(--needs-bg);
+  color: var(--needs-ink);
+}
+
+.bd-btn.needs:hover:not(:disabled) {
+  background: var(--needs-line);
+}
+
+.bd-link {
+  height: 28px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--radius-s);
+  background: transparent;
+  font-size: 13px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.bd-link:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--surface-2);
+}
+
+/* Segmented control */
+
+.bd-seg {
+  display: flex;
+  padding: 3px;
+  gap: 2px;
+  border-radius: 11px;
+  background: var(--bg);
+  border: 1px solid var(--line-strong);
+}
+
+.bd-seg button {
+  height: 32px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: var(--radius-s);
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.bd-seg button:hover {
+  color: var(--text);
+}
+
+.bd-seg button[aria-pressed="true"] {
+  background: var(--line-strong);
+  color: var(--text);
+}
+
+/* Switch */
+
+.bd-switch {
+  width: 40px;
+  height: 24px;
+  flex: none;
+  padding: 3px;
+  border: 0;
+  border-radius: 12px;
+  background: var(--line-strong);
+  display: flex;
+  transition: background 0.15s;
+}
+
+.bd-switch span {
+  width: 18px;
+  height: 18px;
+  border-radius: 9px;
+  background: var(--text);
+  transition: transform 0.15s;
+}
+
+.bd-switch.on {
+  background: var(--done);
+}
+
+.bd-switch.on span {
+  transform: translateX(16px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bd-switch,
+  .bd-switch span {
+    transition: none;
+  }
+}
+
+/* Chips */
+
+.bd-chips {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.bd-chip {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 30px;
+  max-width: 100%;
+  padding: 0 4px 0 10px;
+  border-radius: 9px;
+  background: var(--surface-3);
+  font-size: 13px;
+}
+
+.bd-chip span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bd-chip button {
+  width: 22px;
+  height: 22px;
+  flex: none;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--faint);
+  font-size: 15px;
+  line-height: 1;
+}
+
+.bd-chip button:hover {
+  color: var(--text);
+  background: var(--line-strong);
+}
+
+.bd-chip-add {
+  height: 30px;
+  padding: 0 10px;
+  border-radius: 9px;
+  border: 1px dashed var(--line-strong);
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.bd-chip-add:hover {
+  color: var(--text);
+  border-color: var(--faint);
+}
+
+.bd-chip-input {
+  height: 30px;
+  width: 200px;
+  max-width: 100%;
+  padding: 0 10px;
+  border-radius: 9px;
+  border: 1px solid var(--line-strong);
+  background: var(--bg);
+  font-size: 13px;
+}
+
+/* Inputs */
+
+.bd-text-input {
+  height: 36px;
+  width: 220px;
+  max-width: 100%;
+  padding: 0 12px;
+  border-radius: var(--radius-m);
+  border: 1px solid var(--line-strong);
+  background: var(--bg);
+  font-size: 14px;
+}
+
+/* Notion's default parent reads as part of the sentence until it is focused. */
+.bd-inline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 6px;
+}
+
+.bd-inline .bd-text-input {
+  height: 26px;
+  width: auto;
+  min-width: 120px;
+  field-sizing: content;
+  padding: 0 6px;
+  border-color: transparent;
+  background: transparent;
+  font-size: 13px;
+  color: var(--text-2);
+  text-decoration: underline dotted var(--faint);
+  text-underline-offset: 3px;
+}
+
+.bd-inline .bd-text-input:hover,
+.bd-inline .bd-text-input:focus {
+  border-color: var(--line-strong);
+  background: var(--bg);
+  text-decoration: none;
+}
+
+.bd-budget {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 38px;
+  padding: 0 12px;
+  border-radius: var(--radius-m);
+  background: var(--bg);
+  border: 1px solid var(--line-strong);
+  color: var(--faint);
+}
+
+.bd-budget:focus-within {
+  border-color: var(--faint);
+}
+
+.bd-budget input {
+  width: 72px;
+  background: transparent;
+  border: 0;
+  color: var(--text);
+  font-size: 14px;
+  outline: none;
+}
+
+/* App marks: a letter on a neutral tile; colour stays reserved for state. */
+.bd-app-mark {
+  width: 32px;
+  height: 32px;
+  flex: none;
+  border-radius: var(--radius-s);
+  background: var(--surface-3);
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}

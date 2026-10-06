@@ -75,7 +75,7 @@ export type RunSummary = {
   connections: { name: string; status: string }[];
   /** The agent's final answer, in full, once it has finished. */
   result: string | null;
-  /** Requests the Command Centre's rules answered without asking. */
+  /** Requests the Boundaries rules answered without asking. */
   autoAllowed: number;
   autoDenied: number;
 };

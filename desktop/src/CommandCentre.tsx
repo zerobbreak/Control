@@ -1,314 +1,486 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
-import { BlobAvatar } from "./avatar/BlobAvatar";
-import type { AvatarRole } from "./avatar/blob";
+import { open as pickFolder } from "@tauri-apps/plugin-dialog";
+import { openUrl } from "@tauri-apps/plugin-opener";
+import { useBackend } from "./backend";
 import { CAPABILITIES } from "./capabilities";
-import type { Capability, GitRule, Settings, Tier } from "./types";
+import { RoleGlyph } from "./Face";
+import { addItem, appAccessOf, autonomyOf, autonomyPatch, type Autonomy } from "./settings/autonomy";
+import type { App, AppAccess, Capability, GitRule, Settings, Tier } from "./types";
+import "./boundaries.css";
 
-const TIERS: { tier: Tier; label: string; model: string }[] = [
-  { tier: "fast", label: "Fast", model: "Haiku" },
-  { tier: "balanced", label: "Balanced", model: "Sonnet" },
-  { tier: "strongest", label: "Strongest", model: "Opus" },
+const CONNECTORS_URL = "https://claude.ai/settings/connectors";
+
+const TIERS: { value: Tier; label: string; title: string }[] = [
+  { value: "fast", label: "Fast", title: "Haiku" },
+  { value: "balanced", label: "Balanced", title: "Sonnet" },
+  { value: "strongest", label: "Strongest", title: "Opus" },
 ];
 
-const GIT_RULES: { rule: GitRule; label: string }[] = [
-  { rule: "ask", label: "Ask" },
-  { rule: "allow", label: "Allow" },
-  { rule: "never", label: "Never" },
+const GIT_RULES: { value: GitRule; label: string }[] = [
+  { value: "ask", label: "Ask" },
+  { value: "allow", label: "Allow" },
+  { value: "never", label: "Never" },
+];
+
+const APP_LEVELS: { value: AppAccess; label: string; title: string }[] = [
+  { value: "read", label: "Read", title: "Look only: every change is refused" },
+  { value: "ask", label: "Ask", title: "You approve each change" },
+  { value: "act", label: "Act", title: "Changes go ahead on their own" },
+];
+
+const ALLOWED: { value: "on" | "off"; label: string }[] = [
+  { value: "on", label: "Allowed" },
+  { value: "off", label: "Off" },
 ];
 
 type SaveState = { kind: "idle" } | { kind: "saving" } | { kind: "saved" } | { kind: "error"; message: string };
 
 /**
- * What Mission Control and its agents are allowed to do. Every switch here is enforced by the
- * Rust runtime; defaults are the cautious choice and riskier features are opt-in.
+ * Boundaries: what agents may do without asking. Every rule here is enforced by the Rust runtime,
+ * whatever an agent is told; defaults are the cautious choice and riskier features are opt-in.
  */
 export default function CommandCentre({ onViewAllSessions }: { onViewAllSessions: () => void }) {
-  const [settings, setSettings] = useState<Settings | null>(null);
+  const live = useBackend<Settings | null>("get_settings", "settings-updated", null);
+  // What the user just chose, shown until the runtime confirms it, so controls answer instantly.
+  const [draft, setDraft] = useState<Settings | null>(null);
+  const pending = useRef(0);
   const [save, setSave] = useState<SaveState>({ kind: "idle" });
+  const settings = draft ?? live;
 
   useEffect(() => {
-    invoke<Settings>("get_settings").then(setSettings);
-    const unlisten = listen<Settings>("settings-updated", (e) => setSettings(e.payload));
-    return () => {
-      unlisten.then((stop) => stop());
-    };
-  }, []);
+    if (save.kind !== "saved") return;
+    const timer = window.setTimeout(() => setSave({ kind: "idle" }), 2500);
+    return () => window.clearTimeout(timer);
+  }, [save]);
 
-  if (!settings) return <div className="command-centre" />;
+  if (!settings) return <div className="bd" />;
 
   async function update(patch: Partial<Settings>) {
     const next = { ...settings!, ...patch };
-    setSettings(next);
+    setDraft(next);
+    pending.current++;
     setSave({ kind: "saving" });
     try {
-      setSettings(await invoke<Settings>("update_settings", { settings: next }));
+      await invoke<Settings>("update_settings", { settings: next });
       setSave({ kind: "saved" });
     } catch (err) {
       setSave({ kind: "error", message: String(err) });
+    } finally {
+      // The runtime's settings-updated event carries what was saved; on failure this falls back to it.
+      if (--pending.current === 0) setDraft(null);
     }
   }
 
   return (
-    <div className="command-centre">
-      <header className="cc-head">
-        <div>
-          <h2>Command Centre</h2>
-          <p>Choose what Mission Control and its agents may do. Changes apply to the next run or request.</p>
+    <div className="bd">
+      <header className="bd-head">
+        <div className="bd-intro">
+          <h1>Boundaries</h1>
+          <p>What your agents may do without asking. The runtime enforces every rule here, whatever an agent is told.</p>
         </div>
         <SaveStatus state={save} />
       </header>
 
-      <div className="cc-columns">
-        <div className="cc-column">
-      <Section title="Agents">
-        <Toggle
-          label="Claude Code"
-          avatar="code"
-          description="Code and questions about your folders."
-          checked={settings.claudeEnabled}
-          onChange={(claudeEnabled) => update({ claudeEnabled })}
-        />
-        <Toggle
-          label="Assistant"
-          avatar="assist"
-          description="Errands in Notion, Gmail and the files you drop on the pill. Never runs commands or changes files."
-          checked={settings.assistantEnabled}
-          onChange={(assistantEnabled) => update({ assistantEnabled })}
-        />
-        <Toggle
-          label="Watch my other sessions"
-          description="Read transcripts of Claude Code and Gemini CLI sessions you start yourself, so they show on the board. Off, Mission Control reads only its own runs."
-          checked={settings.watchOtherSessions}
-          onChange={(watchOtherSessions) => update({ watchOtherSessions })}
-        />
-      </Section>
-      <Section title="Models and spending">
-        <Row
-          label="Strongest model allowed"
-          description="The router picks a model per goal. It never goes above this."
-        >
-          <div className="segmented" role="radiogroup" aria-label="Strongest model allowed">
-            {TIERS.map(({ tier, label, model }) => (
-              <button
-                key={tier}
-                role="radio"
-                aria-checked={settings.maxTier === tier}
-                className={settings.maxTier === tier ? "on" : ""}
-                onClick={() => update({ maxTier: tier })}
-              >
-                {label}
-                <span>{model}</span>
-              </button>
-            ))}
-          </div>
-        </Row>
-        <Row label="Spending limit per run" description="A run stops once it has spent this much. Leave empty for no limit.">
-          <BudgetInput value={settings.maxBudgetUsd} onCommit={(maxBudgetUsd) => update({ maxBudgetUsd })} />
-        </Row>
-      </Section>
-      <Section title="Approvals">
-        <Toggle
-          label="Ask before file edits"
-          description="Off, code runs edit files in their folder freely and ask only for commands. On, every edit waits for you."
-          checked={settings.askBeforeEdits}
-          onChange={(askBeforeEdits) => update({ askBeforeEdits })}
-        />
-        <ListEditor
-          label="Always allow these commands"
-          description="Matched as a whole command or its start, so “npm test” also allows “npm test -- --watch”. Commands chained with && ; | or redirects always ask."
-          placeholder="npm test"
-          items={settings.autoApprove}
-          onChange={(autoApprove) => update({ autoApprove })}
-          mono
-        />
-        <Toggle
-          label="Read-only mode"
-          description="Every run may read but never change anything, whatever the goal. Requests to edit or run commands are refused without asking."
-          checked={settings.readOnlyMode}
-          onChange={(readOnlyMode) => update({ readOnlyMode })}
-        />
-      </Section>
-      <Section title="Sessions">
-        <Row label="All sessions" description="Older and idle sessions too. The pill shows live work and recent completions.">
-          <button className="cc-action" onClick={onViewAllSessions}>View all sessions</button>
-        </Row>
-      </Section>
-        </div>
-        <div className="cc-column">
-      <Section title="Assistant">
-        <Row
-          label="Where new Notion pages go"
-          description="A page name or link, used when a goal doesn't say. Leave empty and new pages start as private drafts."
-        >
-          <TextSetting
-            value={settings.notionParent}
-            placeholder="Uni Notes"
-            label="Where new Notion pages go"
-            onCommit={(notionParent) => update({ notionParent })}
-          />
-        </Row>
-        <Toggle
-          label="Reads in apps without asking"
-          description="Search and open in Notion and Gmail. Creating, changing or sending always asks."
-          checked={settings.readAppsFreely}
-          onChange={(readAppsFreely) => update({ readAppsFreely })}
-        />
-      </Section>
-      <Section title="Permissions">
+      <AutonomySection settings={settings} update={update} />
+      <AppsSection settings={settings} update={update} />
+
+      <Section id="computer" title="This computer">
         {(Object.keys(CAPABILITIES) as Capability[]).map((capability) => {
           const copy = CAPABILITIES[capability];
           const answer = settings.capabilities[capability];
           return (
-            <Row key={capability} label={copy.name} description={`${copy.does[0]}. Never ${copy.never[0].charAt(0).toLowerCase() + copy.never[0].slice(1)}.`}>
-              <div className="segmented" role="radiogroup" aria-label={copy.name}>
-                {[
-                  { value: undefined, label: "Ask me" },
-                  { value: true, label: "Allow" },
-                  { value: false, label: "Don't allow" },
-                ].map(({ value, label }) => (
-                  <button
-                    key={label}
-                    role="radio"
-                    aria-checked={answer === value}
-                    className={answer === value ? "on" : ""}
-                    onClick={() => {
-                      const capabilities = { ...settings.capabilities };
-                      if (value === undefined) delete capabilities[capability];
-                      else capabilities[capability] = value;
-                      update({ capabilities });
-                    }}
-                  >
-                    {label}
-                  </button>
-                ))}
-              </div>
+            <Row key={capability} label={copy.name} description={`${copy.does[0]}. Never ${lowerFirst(copy.never[0])}.`}>
+              {answer === undefined && <span className="bd-unasked">Not asked yet</span>}
+              <Segmented
+                label={copy.name}
+                options={ALLOWED}
+                value={answer === undefined ? undefined : answer ? "on" : "off"}
+                onChange={(v) => update({ capabilities: { ...settings.capabilities, [capability]: v === "on" } })}
+              />
             </Row>
           );
         })}
+        <Row label="Watch my other agent sessions" description="Show Claude Code and Gemini CLI sessions you started yourself, read only.">
+          <button className="bd-link" onClick={onViewAllSessions}>
+            View all sessions
+          </button>
+          <Switch label="Watch my other agent sessions" checked={settings.watchOtherSessions} onChange={(watchOtherSessions) => update({ watchOtherSessions })} />
+        </Row>
       </Section>
-      <Section title="Git and GitHub">
-        <Row
-          label="Agents committing"
-          description="Ask follows your other approval settings. Never refuses, even with full autonomy on. Your own commits from the Changes tab are not affected."
-        >
-          <GitRuleControl label="Agents committing" value={settings.agentCommit} onChange={(agentCommit) => update({ agentCommit })} />
+
+      <Section id="code" title="Code and git">
+        <Row label="Agents committing" description="Never refuses, even with full autonomy. Your own commits from Changes are not affected.">
+          <Segmented label="Agents committing" options={GIT_RULES} value={settings.agentCommit} onChange={(agentCommit) => update({ agentCommit })} />
         </Row>
-        <Row
-          label="Agents pushing and opening pull requests"
-          description="Covers git push and creating or merging pull requests with gh. Work leaves your computer, so think before choosing Allow."
-        >
-          <GitRuleControl label="Agents pushing" value={settings.agentPush} onChange={(agentPush) => update({ agentPush })} />
+        <Row label="Agents pushing" description="Covers git push and opening or merging pull requests. Work leaves your computer.">
+          <Segmented label="Agents pushing" options={GIT_RULES} value={settings.agentPush} onChange={(agentPush) => update({ agentPush })} />
         </Row>
-        <ListEditor
+        <ListRow
           label="Protected branches"
-          description="Agents' commits and pushes on these branches always wait for you, whatever the rules above or full autonomy say."
-          placeholder="main"
+          description="Agents always ask before committing or pushing here, even with full autonomy."
           items={settings.protectedBranches}
+          placeholder="main"
           onChange={(protectedBranches) => update({ protectedBranches })}
-          mono
         />
       </Section>
-      <Section title="Folders">
-        <ListEditor
-          label="Only run in these folders"
-          description="Empty means runs may start in any folder. Mission Control's scratch folder is always allowed."
-          placeholder="C:\dev"
-          items={settings.allowedFolders}
-          onChange={(allowedFolders) => update({ allowedFolders })}
-          mono
-        />
+
+      <Section id="models" title="Agents, models and spend">
+        <Row
+          label={
+            <>
+              <span className="bd-glyph">
+                <RoleGlyph role="code" size={12} />
+              </span>
+              Coding agent <span className="bd-sub">Claude Code</span>
+            </>
+          }
+          description="Code and questions about your folders."
+        >
+          <Switch label="Coding agent" checked={settings.claudeEnabled} onChange={(claudeEnabled) => update({ claudeEnabled })} />
+        </Row>
+        <Row
+          label={
+            <>
+              <span className="bd-glyph">
+                <RoleGlyph role="assist" color="var(--needs)" size={13} />
+              </span>
+              Assistant <span className="bd-sub">Files and your apps</span>
+            </>
+          }
+          description="Errands in your apps and the files you hand over. Never runs commands or changes code."
+        >
+          <Switch label="Assistant" checked={settings.assistantEnabled} onChange={(assistantEnabled) => update({ assistantEnabled })} />
+        </Row>
+        <Row label="Strongest model allowed" description="The router picks a model per goal and never goes above this. Simple goals still get a fast model.">
+          <Segmented label="Strongest model allowed" options={TIERS} value={settings.maxTier} onChange={(maxTier) => update({ maxTier })} />
+        </Row>
+        <Row label={<label htmlFor="bd-budget">Spending limit per run</label>} description="A run stops when it reaches this. Leave empty for no limit.">
+          <BudgetInput value={settings.maxBudgetUsd} onCommit={(maxBudgetUsd) => update({ maxBudgetUsd })} />
+        </Row>
       </Section>
-      <Section title="Power features" danger>
-        <DangerToggle
-          label="Full autonomy"
-          description="Allow every request without asking: commands, installs, deletions. Read-only runs and read-only mode still refuse changes. Only turn this on for work you would let run unattended."
-          checked={settings.fullAutonomy}
-          onChange={(fullAutonomy) => update({ fullAutonomy })}
-        />
-      </Section>
-        </div>
-      </div>
     </div>
   );
 }
 
-function Section({ title, danger, children }: { title: string; danger?: boolean; children: ReactNode }) {
+type Update = (patch: Partial<Settings>) => void;
+
+function AutonomySection({ settings, update }: { settings: Settings; update: Update }) {
+  const level = autonomyOf(settings);
+  const [confirming, setConfirming] = useState(false);
+
+  const cards: { value: Autonomy; title: string; text: string }[] = [
+    { value: "look", title: "Look only", text: "Agents read and answer. Every change is refused." },
+    {
+      value: "ask",
+      title: "Ask me",
+      text: settings.askBeforeEdits ? "Every edit, command and app change waits for you." : "Edits go ahead; commands and app changes wait for you.",
+    },
+    { value: "full", title: "Full autonomy", text: "Nothing asks. Git rules and protected branches still hold." },
+  ];
+
+  function choose(next: Autonomy) {
+    // Full autonomy lets agents install, delete and run anything unattended, so it takes a second click.
+    if (next === "full" && level !== "full") {
+      setConfirming(true);
+      return;
+    }
+    setConfirming(false);
+    if (next !== level) update(autonomyPatch(next));
+  }
+
   return (
-    <section className={`cc-section ${danger ? "danger" : ""}`}>
-      <h3>{title}</h3>
-      <div className="cc-rows">{children}</div>
+    <Section
+      id="autonomy"
+      title="Autonomy"
+      before={
+        <>
+          <div className="bd-levels" role="group" aria-label="Autonomy">
+            {cards.map((card) => (
+              <button
+                key={card.value}
+                className={`bd-level ${card.value}`}
+                aria-pressed={level === card.value}
+                aria-expanded={card.value === "full" ? confirming : undefined}
+                onClick={() => choose(card.value)}
+              >
+                <span className="bd-level-title">{card.title}</span>
+                <span className="bd-level-text">{card.text}</span>
+              </button>
+            ))}
+          </div>
+          {confirming && (
+            <div className="bd-confirm" role="alertdialog" aria-labelledby="bd-confirm-title" aria-describedby="bd-confirm-text">
+              <div>
+                <strong id="bd-confirm-title">Turn on full autonomy?</strong>
+                <p id="bd-confirm-text">
+                  Agents will run commands, install software and delete files without asking. Git rules, protected branches and apps set to Read still hold. Only
+                  choose this for work you would let run unattended.
+                </p>
+              </div>
+              <div className="bd-confirm-actions">
+                <button className="bd-btn" autoFocus onClick={() => setConfirming(false)}>
+                  Cancel
+                </button>
+                <button
+                  className="bd-btn danger"
+                  onClick={() => {
+                    setConfirming(false);
+                    update(autonomyPatch("full"));
+                  }}
+                >
+                  Turn on
+                </button>
+              </div>
+            </div>
+          )}
+        </>
+      }
+    >
+      <Row label="Ask before editing files too" description="Every file change in a project waits for you.">
+        <Switch label="Ask before editing files" checked={settings.askBeforeEdits} onChange={(askBeforeEdits) => update({ askBeforeEdits })} />
+      </Row>
+      <ListRow
+        label="Commands that never ask"
+        description="Matched as a whole command or its start, so “npm test” also allows “npm test -- --watch”. Chained commands always ask."
+        items={settings.autoApprove}
+        placeholder="npm test"
+        onChange={(autoApprove) => update({ autoApprove })}
+      />
+      <ListRow
+        label="Folders agents may work in"
+        description="Empty means any folder. Mission Control's scratch folder is always allowed."
+        items={settings.allowedFolders}
+        addLabel="Add folder"
+        onAdd={async () => {
+          const picked = await pickFolder({ directory: true, multiple: false, title: "Let agents work in a folder" });
+          if (typeof picked === "string") update({ allowedFolders: addItem(settings.allowedFolders, picked) });
+        }}
+        onChange={(allowedFolders) => update({ allowedFolders })}
+      />
+    </Section>
+  );
+}
+
+function AppsSection({ settings, update }: { settings: Settings; update: Update }) {
+  const [apps, setApps] = useState<App[] | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [problem, setProblem] = useState<string | null>(null);
+
+  // Claude Code takes a few seconds to say which apps are connected.
+  async function load() {
+    setLoading(true);
+    setProblem(null);
+    try {
+      setApps(await invoke<App[]>("list_apps"));
+    } catch (err) {
+      setProblem(String(err));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    load();
+  }, []);
+
+  // Notion's default parent sits in its row when it's connected, and in a row of its own otherwise.
+  const notionRow = apps?.some((app) => isNotion(app) && app.status === "connected") ?? false;
+  const notionParent = (
+    <TextSetting
+      value={settings.notionParent}
+      placeholder="a private draft"
+      label="Where new Notion pages go"
+      onCommit={(notionParent) => update({ notionParent })}
+    />
+  );
+
+  return (
+    <Section
+      id="apps"
+      title="Apps"
+      action={
+        <button className="bd-link" onClick={load} disabled={loading}>
+          {loading ? "Checking…" : "Check again"}
+        </button>
+      }
+      hint="Read: look only. Ask: you approve each change. Act: changes go ahead on their own."
+    >
+      {apps === null && loading && <p className="bd-row bd-note">Checking which apps are connected…</p>}
+      {problem && (
+        <p className="bd-row bd-note error" role="alert">
+          {problem}
+        </p>
+      )}
+      {apps?.length === 0 && <p className="bd-row bd-note">No apps are connected to Claude yet.</p>}
+      {apps?.map((app) => (
+        <div className="bd-row" key={app.id}>
+          <span className="bd-app-mark" aria-hidden="true">
+            {app.name.charAt(0).toUpperCase()}
+          </span>
+          <div className="bd-text app">
+            <span className="bd-label">{app.name}</span>
+            {isNotion(app) && app.status === "connected" ? (
+              <span className="bd-desc bd-inline">New pages go in {notionParent}</span>
+            ) : (
+              <AppStatusLine status={app.status} />
+            )}
+          </div>
+          <div className="bd-control">
+            {app.status === "needsAuth" ? (
+              <button className="bd-btn needs" onClick={() => openUrl(CONNECTORS_URL)}>
+                Connect
+              </button>
+            ) : (
+              <Segmented
+                label={`${app.name} access`}
+                options={APP_LEVELS}
+                value={appAccessOf(settings, app.id)}
+                onChange={(level) => update({ appAccess: { ...settings.appAccess, [app.id]: level } })}
+              />
+            )}
+          </div>
+        </div>
+      ))}
+      {!notionRow && (
+        <Row label="Where new Notion pages go" description="A page name or link, used when a goal doesn't say. Empty, new pages start as private drafts.">
+          {notionParent}
+        </Row>
+      )}
+      <Row label="Search and read in apps without asking" description="Creating, changing and sending still follow each app's level.">
+        <Switch label="Search and read in apps without asking" checked={settings.readAppsFreely} onChange={(readAppsFreely) => update({ readAppsFreely })} />
+      </Row>
+    </Section>
+  );
+}
+
+function AppStatusLine({ status }: { status: App["status"] }) {
+  if (status === "needsAuth") return <span className="bd-desc needs">Needs you to sign in on claude.ai</span>;
+  if (status === "failed") return <span className="bd-desc failed">Couldn't connect. Check again in a moment.</span>;
+  return <span className="bd-desc">Connected</span>;
+}
+
+function isNotion(app: App) {
+  return /notion/i.test(app.id) || app.name.toLowerCase() === "notion";
+}
+
+/** A labelled group of rows in one card; `before` (the autonomy levels) sits between label and card. */
+function Section(props: { id: string; title: string; action?: ReactNode; hint?: string; before?: ReactNode; children: ReactNode }) {
+  return (
+    <section className="bd-section" id={`bd-${props.id}`} aria-labelledby={`bd-${props.id}-title`}>
+      <div className="bd-section-head">
+        <h2 className="mc-label" id={`bd-${props.id}-title`}>
+          {props.title}
+        </h2>
+        {props.action}
+      </div>
+      {props.hint && <p className="bd-hint">{props.hint}</p>}
+      {props.before}
+      <div className="bd-card">{props.children}</div>
     </section>
   );
 }
 
-function Row({ label, description, avatar, children }: { label: string; description: string; avatar?: AvatarRole; children: ReactNode }) {
+function Row({ label, description, children }: { label: ReactNode; description?: string; children: ReactNode }) {
   return (
-    <div className="cc-row">
-      <div className="cc-text">
-        <div className="cc-label">
-          {avatar && <BlobAvatar role={avatar} state="idle" size={18} />}
-          {label}
-        </div>
-        <p>{description}</p>
+    <div className="bd-row">
+      <div className="bd-text">
+        <span className="bd-label">{label}</span>
+        {description && <span className="bd-desc">{description}</span>}
       </div>
-      <div className="cc-control">{children}</div>
+      <div className="bd-control">{children}</div>
     </div>
   );
 }
 
 function Switch({ label, checked, onChange }: { label: string; checked: boolean; onChange: (on: boolean) => void }) {
   return (
-    <button role="switch" aria-checked={checked} aria-label={label} className={`switch ${checked ? "on" : ""}`} onClick={() => onChange(!checked)}>
+    <button role="switch" aria-checked={checked} aria-label={label} className={`bd-switch${checked ? " on" : ""}`} onClick={() => onChange(!checked)}>
       <span />
     </button>
   );
 }
 
-function Toggle(props: { label: string; description: string; avatar?: AvatarRole; checked: boolean; onChange: (on: boolean) => void }) {
+function Segmented<T extends string>(props: {
+  label: string;
+  options: { value: T; label: string; title?: string }[];
+  value: T | undefined;
+  onChange: (value: T) => void;
+}) {
   return (
-    <Row label={props.label} description={props.description} avatar={props.avatar}>
-      <Switch label={props.label} checked={props.checked} onChange={props.onChange} />
-    </Row>
-  );
-}
-
-/** Turning a risky feature on takes a second, deliberate click; turning it off takes one. */
-function DangerToggle(props: { label: string; description: string; checked: boolean; onChange: (on: boolean) => void }) {
-  const [confirming, setConfirming] = useState(false);
-  return (
-    <Row label={props.label} description={props.description}>
-      {confirming ? (
-        <div className="confirm">
-          <button className="ghost-button" onClick={() => setConfirming(false)}>
-            Cancel
-          </button>
-          <button
-            className="danger-button"
-            onClick={() => {
-              setConfirming(false);
-              props.onChange(true);
-            }}
-          >
-            Turn on
-          </button>
-        </div>
-      ) : (
-        <Switch label={props.label} checked={props.checked} onChange={(on) => (on ? setConfirming(true) : props.onChange(false))} />
-      )}
-    </Row>
-  );
-}
-
-function GitRuleControl({ label, value, onChange }: { label: string; value: GitRule; onChange: (rule: GitRule) => void }) {
-  return (
-    <div className="segmented" role="radiogroup" aria-label={label}>
-      {GIT_RULES.map(({ rule, label }) => (
-        <button key={rule} role="radio" aria-checked={value === rule} className={value === rule ? "on" : ""} onClick={() => onChange(rule)}>
-          {label}
+    <div className="bd-seg" role="group" aria-label={props.label}>
+      {props.options.map((o) => (
+        <button key={o.value} aria-pressed={props.value === o.value} title={o.title} onClick={() => props.value !== o.value && props.onChange(o.value)}>
+          {o.label}
         </button>
       ))}
+    </div>
+  );
+}
+
+/** Chips with a remove button each, and an Add that opens a field, or a picker when `onAdd` is given. */
+function ListRow(props: {
+  label: string;
+  description: string;
+  items: string[];
+  placeholder?: string;
+  addLabel?: string;
+  onAdd?: () => void;
+  onChange: (items: string[]) => void;
+}) {
+  const [adding, setAdding] = useState(false);
+  const [draft, setDraft] = useState("");
+  const addButton = useRef<HTMLButtonElement>(null);
+
+  function finish(keep: boolean) {
+    if (keep) props.onChange(addItem(props.items, draft));
+    setDraft("");
+    setAdding(false);
+    addButton.current?.focus();
+  }
+
+  return (
+    <div className="bd-row">
+      <div className="bd-text wide">
+        <span className="bd-label">{props.label}</span>
+        <span className="bd-desc">{props.description}</span>
+        <ul className="bd-chips" aria-label={props.label}>
+          {props.items.map((item) => (
+            <li key={item} className="bd-chip mc-mono" title={item}>
+              <span>{item}</span>
+              <button aria-label={`Remove ${item}`} onClick={() => props.onChange(props.items.filter((i) => i !== item))}>
+                ×
+              </button>
+            </li>
+          ))}
+          <li>
+            {adding ? (
+              <input
+                className="bd-chip-input mc-mono"
+                autoFocus
+                value={draft}
+                placeholder={props.placeholder}
+                aria-label={`Add to ${props.label.toLowerCase()}`}
+                onChange={(e) => setDraft(e.target.value)}
+                onBlur={() => finish(true)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    finish(true);
+                  } else if (e.key === "Escape") {
+                    e.preventDefault();
+                    finish(false);
+                  }
+                }}
+              />
+            ) : (
+              <button ref={addButton} className="bd-chip-add" onClick={() => (props.onAdd ? props.onAdd() : setAdding(true))}>
+                {props.addLabel ?? "Add"}
+              </button>
+            )}
+          </li>
+        </ul>
+      </div>
     </div>
   );
 }
@@ -325,7 +497,7 @@ function TextSetting(props: { value: string | null; placeholder: string; label: 
 
   return (
     <input
-      className="text-setting"
+      className="bd-text-input"
       value={text}
       placeholder={props.placeholder}
       aria-label={props.label}
@@ -337,98 +509,44 @@ function TextSetting(props: { value: string | null; placeholder: string; label: 
 }
 
 function BudgetInput({ value, onCommit }: { value: number | null; onCommit: (usd: number | null) => void }) {
-  const [text, setText] = useState(value?.toString() ?? "");
-  useEffect(() => setText(value?.toString() ?? ""), [value]);
+  const [text, setText] = useState(value?.toFixed(2) ?? "");
+  useEffect(() => setText(value?.toFixed(2) ?? ""), [value]);
 
   function commit() {
     const usd = text.trim() === "" ? null : Number(text);
     if (usd !== null && !(usd > 0)) {
-      setText(value?.toString() ?? "");
+      setText(value?.toFixed(2) ?? "");
       return;
     }
     if (usd !== value) onCommit(usd);
   }
 
   return (
-    <label className="budget">
-      <span>$</span>
+    <span className="bd-budget">
+      <span aria-hidden="true">$</span>
       <input
+        id="bd-budget"
         inputMode="decimal"
         value={text}
         placeholder="No limit"
-        aria-label="Spending limit per run in US dollars"
         onChange={(e) => setText(e.target.value)}
         onBlur={commit}
         onKeyDown={(e) => e.key === "Enter" && commit()}
       />
-    </label>
-  );
-}
-
-function ListEditor(props: {
-  label: string;
-  description: string;
-  placeholder: string;
-  items: string[];
-  onChange: (items: string[]) => void;
-  mono?: boolean;
-}) {
-  const [draft, setDraft] = useState("");
-
-  function add() {
-    const item = draft.trim();
-    if (!item) return;
-    if (!props.items.includes(item)) props.onChange([...props.items, item]);
-    setDraft("");
-  }
-
-  return (
-    <div className="cc-row list">
-      <div className="cc-text">
-        <div className="cc-label">{props.label}</div>
-        <p>{props.description}</p>
-      </div>
-      <ul className="chips">
-        {props.items.map((item) => (
-          <li key={item} className={props.mono ? "mono" : ""}>
-            {item}
-            <button aria-label={`Remove ${item}`} onClick={() => props.onChange(props.items.filter((i) => i !== item))}>
-              ×
-            </button>
-          </li>
-        ))}
-      </ul>
-      <form
-        className="add"
-        onSubmit={(e) => {
-          e.preventDefault();
-          add();
-        }}
-      >
-        <input
-          className={props.mono ? "mono" : ""}
-          value={draft}
-          placeholder={props.placeholder}
-          aria-label={props.label}
-          onChange={(e) => setDraft(e.target.value)}
-        />
-        <button type="submit" disabled={!draft.trim()}>
-          Add
-        </button>
-      </form>
-    </div>
+    </span>
   );
 }
 
 function SaveStatus({ state }: { state: SaveState }) {
-  switch (state.kind) {
-    case "idle":
-      return null;
-    case "saving":
-      return <span className="save">Saving…</span>;
-    case "saved":
-      return <span className="save ok">Saved</span>;
-    case "error":
-      return <span className="save error">Not saved: {state.message}</span>;
-  }
+  return (
+    <span className={`bd-save ${state.kind}`} role="status" aria-live="polite">
+      {state.kind === "saving" && "Saving…"}
+      {state.kind === "saved" && "Saved"}
+      {state.kind === "error" && `Not saved: ${state.message}`}
+    </span>
+  );
+}
+
+function lowerFirst(text: string) {
+  return text.charAt(0).toLowerCase() + text.slice(1);
 }
