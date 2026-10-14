@@ -1,18 +1,12 @@
-:root {
-  --island: #0a0a0c;
-  --island-edge: rgba(255, 255, 255, 0.08);
-  --eye: #f4f4f5;
-  --text: #f4f4f5;
-  --muted: #a1a1aa;
-  --faint: rgba(255, 255, 255, 0.06);
-  --thinking: #a78bfa;
-  --working: #60a5fa;
-  --needs-you: #fbbf24;
-  --done: #4ade80;
-  --idle: #71717a;
-  --morph: 320ms cubic-bezier(0.32, 0.72, 0, 1);
+/* The island: a black shape hanging from the top edge of the screen. Collapsed it is a 40px pill;
+   open it is a 360px card of a few lines. Colours come from theme.css and are spent only on state. */
 
-  font-family: Inter, "Segoe UI", system-ui, sans-serif;
+:root {
+  --morph: 280ms cubic-bezier(0.32, 0.72, 0, 1);
+  /* The amber ring around an island that needs you. */
+  --needs-ring: color-mix(in srgb, var(--needs) 35%, black);
+  --detail: #a8abb2;
+  font-family: var(--font);
   font-size: 13px;
   color: var(--text);
   -webkit-font-smoothing: antialiased;
@@ -38,277 +32,905 @@ body,
   justify-content: center;
   align-items: flex-start;
   height: 100%;
-  padding-top: 8px;
 }
 
-/* ---------- The island ---------- */
-
-.pill {
-  --accent: var(--idle);
+.island {
   position: relative;
-  min-width: 132px;
-  width: fit-content;
-  padding: 0 14px;
-  height: 36px;
-  border-radius: 18px;
-  background: var(--island);
-  border: 1px solid var(--island-edge);
-  box-shadow:
-    0 6px 18px rgba(0, 0, 0, 0.35),
-    0 0 0 0 transparent;
-  cursor: pointer;
+  flex: none;
   overflow: hidden;
+  background: var(--island);
+  border-radius: 0 0 var(--radius-island) var(--radius-island);
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.45);
   transition:
-    min-width var(--morph),
+    width var(--morph),
     height var(--morph),
-    border-radius var(--morph),
-    box-shadow 400ms ease;
+    box-shadow 200ms ease;
 }
-
-.pill:not(.expanded):hover {
-  min-width: 148px;
+.island.open {
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.5);
 }
-
-.pill.thinking { --accent: var(--thinking); }
-.pill.working { --accent: var(--working); }
-.pill.needs { --accent: var(--needs-you); }
-.pill.done { --accent: var(--done); }
-
-/* A soft halo in the state colour, so state reads even from the corner of your eye. */
-.pill:not(.idle) {
+.island.needs {
   box-shadow:
-    0 6px 18px rgba(0, 0, 0, 0.35),
-    0 0 14px -2px color-mix(in srgb, var(--accent) 55%, transparent);
+    0 0 0 1px var(--needs-ring),
+    0 6px 16px rgba(0, 0, 0, 0.45);
+}
+/* A soft breathing ring while an agent works, so the island looks alive from across the room. */
+.island.working,
+.island.thinking {
+  animation: mc-breathe 2.4s ease-in-out infinite;
+}
+.island.thinking {
+  animation-duration: 3.2s;
+}
+@keyframes mc-breathe {
+  0%,
+  100% {
+    box-shadow:
+      0 0 0 1px color-mix(in srgb, var(--working) 10%, transparent),
+      0 6px 16px rgba(0, 0, 0, 0.45);
+  }
+  50% {
+    box-shadow:
+      0 0 0 1px color-mix(in srgb, var(--working) 55%, transparent),
+      0 6px 22px color-mix(in srgb, var(--working) 22%, rgba(0, 0, 0, 0.45));
+  }
+}
+.island.done {
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--done) 40%, transparent),
+    0 6px 16px rgba(0, 0, 0, 0.45);
+}
+.island-time {
+  flex: none;
+  font-size: 11px;
+  color: var(--muted);
+}
+.live-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-right: 6px;
+  border-radius: 3px;
+  background: var(--working);
+  vertical-align: middle;
+  animation: mc-pulse 1.2s ease-in-out infinite;
+}
+.live-dot.thinking {
+  background: var(--text-2);
+}
+.live-dot.needs {
+  background: var(--needs);
 }
 
-.pill.needs:not(.expanded) {
-  animation: nudge 2.4s ease-in-out infinite;
+/* A finished answer, read on the card: scrolls past about ten lines instead of growing the island. */
+.answer {
+  max-height: 220px;
+  overflow-y: auto;
+  padding: 10px 12px;
+  border-radius: var(--radius-m);
+  background: var(--surface);
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-2);
+  user-select: text;
+  scrollbar-width: thin;
+}
+.answer p {
+  margin: 0 0 8px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.answer p:last-child {
+  margin-bottom: 0;
 }
 
-.pill.expanded {
-  min-width: 404px;
-  height: 360px;
-  border-radius: 26px;
-  cursor: default;
-}
-
-.pill-face {
-  height: 100%;
+/* What the agent just did, newest at the bottom, the live one spinning. */
+.activity {
   display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: var(--radius-m);
+  list-style: none;
+  background: var(--surface);
+  font-size: 12px;
+  color: var(--detail);
+}
+.activity li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  animation: mc-arrive 180ms ease-out;
+}
+.activity-mark {
+  display: inline-flex;
+  flex: none;
   align-items: center;
   justify-content: center;
-  gap: 10px;
-  transition: opacity 160ms ease;
+  width: 12px;
+  height: 12px;
+  font-size: 11px;
+  line-height: 1;
+  color: var(--done);
 }
-
-/* ---------- Blob avatars ---------- */
-
-.blob-avatar {
-  display: block;
-  flex: none;
-  overflow: visible;
+.activity li.failed .activity-mark {
+  color: var(--failed);
 }
-
-.blob-eye {
-  fill: #0b0b0f;
+.activity li.current .activity-mark {
+  border: 1.5px solid color-mix(in srgb, var(--working) 30%, transparent);
+  border-top-color: var(--working);
+  border-radius: 50%;
+  animation: mc-spin 0.8s linear infinite;
 }
-
-.blob-smile {
-  fill: none;
-  stroke: #0b0b0f;
-  stroke-width: 0.085;
-  stroke-linecap: round;
-}
-
-.blob-ring {
-  fill: none;
-  stroke: var(--needs-you);
-  stroke-width: 0.07;
-}
-
-/* Agents sit beside Mission Control, set off by a hairline. */
-.crew {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  padding-left: 10px;
-  border-left: 1px solid rgba(255, 255, 255, 0.12);
-}
-
-/* ---------- Expanded panel ---------- */
-
-.pill.expanded .pill-face {
-  display: none;
-}
-
-.panel {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  flex-direction: column;
-  padding: 14px 16px 10px;
-  opacity: 0;
-  animation: fade-in 200ms ease 140ms forwards;
-}
-
-.panel-head {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding-bottom: 12px;
-  border-bottom: 1px solid var(--faint);
-}
-
-.panel-avatar {
-  display: grid;
-  place-items: center;
-  width: 52px;
-  height: 52px;
-  border-radius: 16px;
-  background: rgba(255, 255, 255, 0.04);
-}
-
-.panel-title {
-  display: flex;
-  flex-direction: column;
+.activity-text {
   flex: 1;
-  line-height: 1.3;
+}
+.activity-tool {
+  color: var(--text-2);
+}
+.activity .mono {
+  font-size: 11px;
+}
+.activity li.current .activity-tool {
+  color: var(--working-ink);
+}
+.activity-ago {
+  flex: none;
+  font-size: 11px;
+  color: var(--faint);
+}
+@keyframes mc-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
-.panel-title span {
-  color: var(--accent);
-  font-size: 12px;
+/* Laid out at its natural size and measured; the island morphs to match. */
+.island-content {
+  position: absolute;
+  top: 0;
+  left: 50%;
+  width: max-content;
+  transform: translateX(-50%);
+}
+.island-content.card-size {
+  width: 360px;
+}
+
+.moment {
+  animation: mc-arrive 180ms ease-out;
+}
+@keyframes mc-arrive {
+  from {
+    opacity: 0;
+    transform: translateY(-2px);
+  }
+}
+
+/* The eyes look toward the cursor while the island is open (see useLookAt). */
+.island .mc-eye {
+  transform: translate(var(--look-x, 0), var(--look-y, 0));
+  transition: transform 120ms linear;
 }
 
 button {
   font: inherit;
-  color: inherit;
   cursor: pointer;
 }
-
-.ghost {
-  width: 28px;
-  height: 28px;
-  border: none;
-  border-radius: 8px;
-  background: transparent;
-  color: var(--muted);
+button:disabled {
+  cursor: default;
+}
+:focus-visible {
+  outline: 2px solid var(--working);
+  outline-offset: 1px;
 }
 
-.ghost:hover {
-  background: rgba(255, 255, 255, 0.08);
-  color: var(--text);
+.mono {
+  font-family: var(--mono);
 }
-
-.agents {
-  flex: 1;
-  margin: 0;
-  padding: 8px 0;
-  list-style: none;
-  overflow-y: auto;
-}
-
-.agents li {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 7px 4px;
-}
-
-.agents li > div {
+.one-line {
   min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-
-.agents .empty {
-  color: var(--muted);
-  justify-content: center;
-  padding-top: 40px;
-}
-
-.agent-name {
-  font-weight: 600;
-}
-
-.project {
-  margin-left: 8px;
-  color: var(--muted);
-  font-weight: 400;
-  font-size: 12px;
-}
-
-.agent-activity {
-  color: var(--muted);
-  font-size: 12px;
+.two-line {
   display: -webkit-box;
-  -webkit-line-clamp: 1;
+  -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
 
-.ask {
+/* ---------- Collapsed ---------- */
+
+.collapsed {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 10px 12px;
-  border-radius: 14px;
-  background: rgba(255, 255, 255, 0.06);
-  border: 1px solid transparent;
-  transition: border-color 160ms ease;
+  height: 40px;
+  padding-right: 6px;
+}
+.collapsed.rest {
+  padding-right: 0;
 }
 
-.ask:focus-within {
-  border-color: color-mix(in srgb, var(--accent) 60%, transparent);
+.island-open {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 40px;
+  min-width: 0;
+  padding: 0 10px 0 16px;
+  border: 0;
+  border-radius: 0 0 var(--radius-island) var(--radius-island);
+  background: transparent;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 500;
+}
+.collapsed.rest .island-open {
+  padding: 0 18px;
+}
+.island-open:focus-visible {
+  outline-offset: -3px;
 }
 
-.ask span {
+.collapsed .mc-face {
+  gap: 4px;
+}
+.collapsed.rest .mc-face {
+  gap: 6px;
+}
+.collapsed .mc-face .mc-eye {
+  width: 9px;
+  height: 13px;
+  border-radius: 5px;
+}
+
+.island-text {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.island-muted {
+  max-width: 170px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: var(--muted);
 }
 
-.ask input {
+/* ---------- Hub: mascot on the left, a 2x2 grid of agents on the right ---------- */
+.card.hub {
+  flex-direction: row;
+  align-items: stretch;
+  gap: 12px;
+}
+.hub-mascot {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 104px;
+  padding: 10px 6px;
+  border-radius: var(--radius-l);
+  background: var(--surface);
+  text-align: center;
+}
+.hub-mascot > strong {
+  margin-top: 8px;
+  font-size: 12px;
+  font-weight: 600;
+}
+.hub-summary {
+  font-size: 11px;
+  color: var(--muted);
+}
+.hub-summary.busy {
+  color: var(--working-ink);
+}
+.hub-tools {
+  display: flex;
+  gap: 4px;
+  margin-top: 4px;
+}
+.hub-grid {
+  display: grid;
   flex: 1;
-  border: none;
+  grid-template-columns: 1fr 1fr;
+  grid-auto-rows: 1fr;
+  gap: 6px;
+  min-width: 0;
+}
+.tile {
+  --a: var(--faint);
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid color-mix(in srgb, var(--a) 22%, transparent);
+  border-radius: var(--radius-m);
+  background: linear-gradient(145deg, color-mix(in srgb, var(--a) 16%, var(--surface)), var(--surface) 70%);
+  color: var(--text);
+  text-align: left;
+  transition: border-color 150ms ease, transform 150ms ease;
+}
+.tile:hover {
+  border-color: color-mix(in srgb, var(--a) 55%, transparent);
+  transform: translateY(-1px);
+}
+.tile.claude { --a: #f7701d; }
+.tile.gemini { --a: #4b8cf7; }
+.tile.browser { --a: #14b981; }
+.tile.assistant { --a: #8b5cf6; }
+.tile .mc-face {
+  margin-bottom: 4px;
+}
+.tile-name {
+  font-size: 13px;
+  font-weight: 600;
+}
+.tile-line {
+  max-width: 100%;
+  font-size: 11px;
+  color: var(--detail);
+}
+.tile-state {
+  font-size: 10px;
+  color: var(--faint);
+}
+.tile.live {
+  border-color: color-mix(in srgb, var(--a) 60%, transparent);
+  animation: mc-tile-glow 2.2s ease-in-out infinite;
+}
+.tile.live .tile-line {
+  color: var(--text-2);
+}
+.tile.result .tile-line {
+  color: var(--done-ink);
+}
+.tile.missing {
+  opacity: 0.5;
+  filter: grayscale(0.7);
+}
+@keyframes mc-tile-glow {
+  50% {
+    box-shadow: 0 0 14px color-mix(in srgb, var(--a) 35%, transparent);
+  }
+}
+
+/* Other busy agents ride along on the right, coloured by their state. */
+.crew {
+  display: flex;
+  gap: 4px;
+  margin-left: 4px;
+  padding: 4px 6px;
+  border-radius: 10px;
+  background: var(--surface-2);
+}
+.crew-dot {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 8px;
+  background: var(--working-bg);
+}
+.crew-dot.thinking {
+  background: var(--surface-3);
+}
+.crew-dot.needs {
+  background: var(--needs-bg);
+}
+.crew-dot.done {
+  background: var(--done-bg);
+}
+
+.pill-btn {
+  flex: none;
+  height: 28px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 14px;
+  background: var(--line-strong);
+  color: var(--text);
+  font-size: 12px;
+}
+.pill-btn:hover {
+  background: var(--surface-3);
+}
+.pill-btn.allow {
+  background: var(--needs);
+  color: var(--bg);
+  font-weight: 600;
+}
+.pill-btn.done {
+  background: var(--done-bg);
+  color: var(--done-ink);
+  font-weight: 500;
+}
+.pill-btn:disabled {
+  opacity: 0.5;
+}
+
+/* Now playing: a level meter, the title and the app; controls show on hover or focus. */
+.now-playing {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.bars {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 14px;
+}
+.bars span {
+  width: 3px;
+  height: 5px;
+  border-radius: 1px;
+  background: var(--done);
+}
+.now-playing.playing .bars span {
+  animation: mc-level 1s ease-in-out infinite;
+}
+.bars span:nth-child(2) {
+  animation-delay: -0.3s;
+}
+.bars span:nth-child(3) {
+  animation-delay: -0.6s;
+}
+.bars span:nth-child(4) {
+  animation-delay: -0.15s;
+}
+@keyframes mc-level {
+  0%,
+  100% {
+    height: 5px;
+  }
+  50% {
+    height: 14px;
+  }
+}
+
+.media-controls {
+  display: none;
+  gap: 4px;
+}
+.collapsed.media:hover .media-controls,
+.collapsed.media:focus-within .media-controls {
+  display: flex;
+}
+.round {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: 0;
+  border-radius: 13px;
+  background: var(--surface-3);
+  color: var(--text);
+}
+.round:hover {
+  background: var(--line-strong);
+}
+
+/* ---------- Cards ---------- */
+
+.card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 360px;
+  padding: 12px 14px 14px;
+}
+
+.card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 24px;
+}
+.card-head > .mc-face {
+  flex: none;
+}
+.card-tag {
+  min-width: 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+.card-tag.working {
+  color: var(--working-ink);
+}
+.card-tag.needs {
+  color: var(--needs-ink);
+}
+.card-tag.done {
+  color: var(--done-ink);
+}
+.card-tag.failed {
+  color: var(--failed-ink);
+}
+.card-meta {
+  flex: none;
+  max-width: 140px;
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.icon-btn {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--surface-2);
+  color: var(--detail);
+}
+.icon-btn:hover {
+  background: var(--surface-3);
+  color: var(--text);
+}
+.icon-btn.meta {
+  margin-left: auto;
+}
+
+.card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.card-title {
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.35;
+}
+.card-detail {
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--detail);
+}
+.card-detail .mono,
+.card-detail.mono {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text-2);
+}
+.card-note {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--faint);
+}
+.card-error {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--failed-ink);
+}
+.text-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--working-ink);
+  font-size: inherit;
+  text-decoration: underline;
+}
+
+.card-counts {
+  display: flex;
+  gap: 14px;
+  font-size: 12px;
+  color: var(--detail);
+}
+
+.card-actions {
+  display: flex;
+  gap: 6px;
+}
+.btn {
+  display: inline-flex;
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-width: 0;
+  height: 34px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: var(--radius-m);
+  background: var(--surface-3);
+  color: var(--text);
+  font-size: 13px;
+  white-space: nowrap;
+}
+.btn:hover {
+  background: var(--line-strong);
+}
+.btn.primary {
+  background: var(--text);
+  color: var(--bg);
+  font-weight: 600;
+}
+.btn.primary:hover {
+  background: #fff;
+}
+.btn.allow {
+  background: var(--needs);
+  color: var(--bg);
+  font-weight: 600;
+}
+.btn.allow:hover {
+  background: var(--needs-ink);
+}
+.btn.stop {
+  color: var(--failed-ink);
+}
+.btn.small {
+  flex: none;
+  height: 28px;
+  font-size: 12px;
+}
+.btn:disabled {
+  opacity: 0.5;
+}
+
+.card-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--detail);
+  cursor: pointer;
+}
+.card-check input {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: var(--needs);
+}
+
+/* Where the lead agent is in its turn: Thinking, Working, Done. */
+.progress {
+  display: flex;
+  gap: 3px;
+}
+.progress span {
+  flex: 1;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--surface-3);
+}
+.progress .done {
+  background: var(--working);
+}
+.progress .current {
+  background: color-mix(in srgb, var(--working) 45%, var(--surface-3));
+  animation: mc-pulse 1.6s ease-in-out infinite;
+}
+.progress .blocked {
+  background: var(--needs);
+}
+@keyframes mc-pulse {
+  50% {
+    opacity: 0.55;
+  }
+}
+
+.others {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: var(--radius-m);
+  list-style: none;
+  background: var(--surface);
+  font-size: 12px;
+  color: var(--detail);
+}
+.others li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.others li > svg,
+.others li > .mc-glyph {
+  flex: none;
+}
+
+/* ---------- Goal card ---------- */
+
+.chips {
+  display: flex;
+  gap: 6px;
+  min-width: 0;
+  overflow: hidden;
+}
+.chip {
+  display: inline-flex;
+  flex: 0 1 auto;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  max-width: 140px;
+  height: 24px;
+  padding: 0 2px 0 8px;
+  border-radius: var(--radius-s);
+  background: var(--surface-2);
+  color: var(--text-2);
+  font-size: 12px;
+}
+.chip > svg {
+  flex: none;
+  color: var(--muted);
+}
+.chip.project {
+  background: var(--working-bg);
+  color: var(--working-ink);
+}
+.chip.missing {
+  color: var(--failed-ink);
+}
+.chip.more {
+  flex: none;
+  padding: 0 8px;
+  color: var(--muted);
+}
+.chip-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chip-x {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: inherit;
+  opacity: 0.75;
+}
+.chip-x:hover {
+  opacity: 1;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.add-row {
+  display: flex;
+  gap: 6px;
+}
+
+.compose textarea {
+  padding: 0;
+  border: 0;
   outline: none;
+  resize: none;
   background: transparent;
   color: var(--text);
   font: inherit;
+  font-size: 14px;
+  line-height: 1.45;
+  user-select: text;
+}
+.compose textarea::placeholder {
+  color: var(--faint);
 }
 
-.ask input::placeholder {
-  color: var(--muted);
-}
-
-.panel-foot {
+.mention-menu {
   display: flex;
-  justify-content: flex-end;
-  padding-top: 6px;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: -4px;
+}
+.mention-menu button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 30px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--radius-s);
+  background: transparent;
+  color: var(--text-2);
+  font-size: 12px;
+  text-align: left;
+}
+.mention-menu button.active {
+  background: var(--surface-3);
+}
+.mention-menu button > span:last-child {
+  min-width: 0;
+  margin-left: auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--faint);
+}
+.mention-mark {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
+  background: var(--surface-3);
+  font-size: 10px;
+  font-weight: 600;
 }
 
-.link {
-  border: none;
-  background: none;
-  color: var(--muted);
-  font-size: 11px;
+.compose-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
 }
-
-.link:hover {
-  color: var(--text);
+.plan {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 12px;
+  color: var(--detail);
+  white-space: nowrap;
 }
-
-/* ---------- Motion ---------- */
-
-@keyframes nudge {
-  0%, 100% { transform: translateY(0); }
-  8% { transform: translateY(2px); }
-  16% { transform: translateY(0); }
+.plan.hint {
+  color: var(--faint);
 }
-
-@keyframes fade-in {
-  to { opacity: 1; }
+.plan.error {
+  color: var(--failed-ink);
+  line-height: 1.4;
+  white-space: normal;
+}
+.btn.go {
+  flex: none;
+  height: 32px;
+  margin-left: auto;
+  padding: 0 16px;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after {
-    animation-duration: 0s !important;
-    transition-duration: 0s !important;
+  .island,
+  .island .mc-eye {
+    transition: none;
+  }
+  .moment,
+  .island.working,
+  .island.thinking,
+  .tile.live,
+  .live-dot,
+  .activity li,
+  .activity li.current .activity-mark,
+  .progress .current,
+  .now-playing.playing .bars span {
+    animation: none;
+  }
+  .now-playing.playing .bars span:nth-child(even) {
+    height: 11px;
   }
 }

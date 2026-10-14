@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   blobFrame,
+  gazeTowards,
   mixHex,
   MOTION,
   OUTLINE_POINTS,
@@ -135,7 +136,7 @@ describe("blobFrame", () => {
   });
 
   it("copes with negative times and big seeds", () => {
-    const roles: AvatarRole[] = ["mc", "code", "web", "desk"];
+    const roles: AvatarRole[] = ["mc", "code", "web", "desk", "assist"];
     for (const role of roles) {
       const frame = blobFrame(ROLE_SHAPE[role], "needs", -3.7, 9999);
       expect(numbers(frame.body).every(Number.isFinite)).toBe(true);
@@ -150,5 +151,33 @@ describe("mixHex", () => {
     expect(mixHex("#000000", "#ffffff", 0)).toBe("#000000");
     expect(mixHex("#000000", "#ffffff", 1)).toBe("#ffffff");
     expect(mixHex("#60a5fa", "#000000", 0.5)).toBe("#30537d");
+  });
+});
+
+describe("gaze", () => {
+  const eyes = (gaze?: { x: number; y: number }) => {
+    const frame = blobFrame("orb", "working", 1, 0, gaze);
+    if (frame.eyes.kind !== "open") throw new Error("expected open eyes");
+    return frame.eyes.left;
+  };
+
+  it("looks straight ahead by default", () => {
+    expect(eyes()).toEqual(eyes({ x: 0, y: 0 }));
+  });
+
+  it("moves the eyes towards where it is looking", () => {
+    expect(eyes({ x: 1, y: 0 }).cx).toBeGreaterThan(eyes().cx);
+    expect(eyes({ x: -1, y: 0 }).cx).toBeLessThan(eyes().cx);
+    expect(eyes({ x: 0, y: 1 }).cy).toBeGreaterThan(eyes().cy);
+  });
+
+  it("keeps the eyes inside the face however far away the point is", () => {
+    expect(eyes({ x: 50, y: 0 })).toEqual(eyes({ x: 1, y: 0 }));
+  });
+
+  it("turns fully only once the point is far enough away", () => {
+    expect(gazeTowards(300, 0, 150)).toEqual({ x: 1, y: 0 });
+    expect(gazeTowards(0, 75, 150)).toEqual({ x: 0, y: 0.5 });
+    expect(gazeTowards(0, 0, 150)).toEqual({ x: 0, y: 0 });
   });
 });

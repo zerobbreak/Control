@@ -1,5 +1,5 @@
 import { useEffect, useId, useMemo, useRef, type RefObject } from "react";
-import { blobFrame, mixHex, ROLE_COLOR, ROLE_SHAPE, VIEWBOX, type AvatarRole, type AvatarState, type BlobFrame } from "./blob";
+import { blobFrame, gazeTowards, mixHex, ROLE_COLOR, ROLE_SHAPE, VIEWBOX, type AvatarRole, type AvatarState, type BlobFrame, type Gaze } from "./blob";
 
 type Props = {
   role: AvatarRole;
@@ -7,19 +7,25 @@ type Props = {
   /** Rendered width and height in CSS pixels. */
   size: number;
   title?: string;
+  /** A point in page coordinates to keep the eyes on, such as the cursor. Read every frame. */
+  lookAt?: RefObject<{ x: number; y: number } | null>;
 };
+
+/** How far the eyes move towards their target each frame, so they glide rather than snap. */
+const EASE = 0.18;
 
 /**
  * A wobbling blob with eyes. The shape says which agent it is; the motion says what it is doing.
  * Frames are written straight onto the SVG nodes, so animating never re-renders React.
  */
-export function BlobAvatar({ role, state, size, title }: Props) {
+export function BlobAvatar({ role, state, size, title, lookAt }: Props) {
   const shape = ROLE_SHAPE[role];
   const color = ROLE_COLOR[role];
   const gradientId = "blob" + useId().replace(/[^a-zA-Z0-9]/g, "");
   const seed = useMemo(() => Math.random() * 100, []);
   const first = blobFrame(shape, state, 0, seed);
 
+  const svg = useRef<SVGSVGElement>(null);
   const body = useRef<SVGPathElement>(null);
   const ring = useRef<SVGPathElement>(null);
   const left = useRef<SVGEllipseElement & SVGPathElement>(null);
@@ -28,16 +34,21 @@ export function BlobAvatar({ role, state, size, title }: Props) {
   useEffect(() => {
     if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return;
     let raf = 0;
+    const gaze: Gaze = { x: 0, y: 0 };
     const draw = (now: number) => {
-      apply(blobFrame(shape, state, now / 1000, seed), { body, ring, left, right });
+      const target = lookAt?.current && svg.current ? towards(svg.current, lookAt.current, size) : null;
+      gaze.x += ((target?.x ?? 0) - gaze.x) * EASE;
+      gaze.y += ((target?.y ?? 0) - gaze.y) * EASE;
+      apply(blobFrame(shape, state, now / 1000, seed, gaze), { body, ring, left, right });
       raf = requestAnimationFrame(draw);
     };
     raf = requestAnimationFrame(draw);
     return () => cancelAnimationFrame(raf);
-  }, [shape, state, seed]);
+  }, [shape, state, seed, lookAt, size]);
 
   return (
     <svg
+      ref={svg}
       className={`blob-avatar ${role} ${state}`}
       width={size}
       height={size}
@@ -78,6 +89,12 @@ export function BlobAvatar({ role, state, size, title }: Props) {
       )}
     </svg>
   );
+}
+
+/** The gaze from an avatar's centre towards a page point; eyes turn fully a few sizes away. */
+function towards(node: SVGSVGElement, point: { x: number; y: number }, size: number): Gaze {
+  const box = node.getBoundingClientRect();
+  return gazeTowards(point.x - (box.left + box.width / 2), point.y - (box.top + box.height / 2), size * 2.5);
 }
 
 type Nodes = {
