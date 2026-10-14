@@ -43,7 +43,7 @@ export function agentName(run: RunSummary): string {
     case "browse":
       return "Browser";
     default:
-      return "Claude";
+      return run.agent === "gemini" ? "Gemini" : "Claude";
   }
 }
 

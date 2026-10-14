@@ -17,13 +17,15 @@ import { CAPABILITIES, recycleSuggestions } from "./capabilities";
 import { splitContext } from "./context";
 import { agentCards, pillCards, sessionView } from "./runs";
 import { Collapsed } from "./island/Collapsed";
+import { Hub } from "./island/Hub";
 import { ApprovalCard, DropCard, ResultCard, WorkCard } from "./island/Cards";
 import { useLookAt, useMorphSize, useSeen } from "./island/hooks";
-import { crewOf, islandCards, islandMoment, reviewView, seenKey, withRemembered, type Remember } from "./island/island";
+import { crewOf, islandCards, islandMoment, reviewView, seenKey, withRemembered, type HubId, type Remember } from "./island/island";
 import type {
   App,
   BoardSnapshot,
   Capability,
+  CliStatus,
   ContextItem,
   MediaAction,
   NowPlaying,
@@ -78,6 +80,11 @@ export default function Pill() {
   const [asking, setAsking] = useState<Capability | null>(null);
   const [approvalIndex, setApprovalIndex] = useState(0);
   const [apps, setApps] = useState<App[] | null>(null);
+  const [clis, setClis] = useState<CliStatus[]>([]);
+  // The agent whose tile the goal was opened from; it takes the goal, whatever else is running.
+  const [target, setTarget] = useState<HubId | null>(null);
+  // The agent card shown in detail, chosen from its tile.
+  const [focus, setFocus] = useState<string | null>(null);
   const [seen, markSeen] = useSeen();
   // A native file picker takes focus from the island; that must not tuck it away.
   const picking = useRef(false);
@@ -93,10 +100,14 @@ export default function Pill() {
   const crew = crewOf(cards, card);
   const waiting = [...approvals].sort((a, b) => a.askedAt.localeCompare(b.askedAt));
   const { folder, attachments } = splitContext(context);
-  const planKey = `${prompt.trim()}\n${context.map((c) => c.path).join("\n")}`;
+  const planKey = `${target ?? ""}\n${prompt.trim()}\n${context.map((c) => c.path).join("\n")}`;
+  const agent = target === "claude" || target === "gemini" ? target : undefined;
   const preview = planned?.key === planKey ? planned.preview : null;
   // Files a finished assistant suggested removing, offered from its result card.
-  const resultRun = (moment === "done" && card?.run) || null;
+  const focusCard = (focus && cards.find((c) => c.key === focus)) || null;
+  const subject = focusCard ?? card;
+  const showsResult = focusCard ? !focusCard.active : moment === "done" || moment === "failed";
+  const resultRun = (showsResult && subject && !subject.active && subject.run?.status === "finished" && subject.run) || null;
   const suggested = useDescribed(resultRun ? recycleSuggestions(resultRun.result).paths : []);
   // Media controls are asked about once the browser agent has finished something.
   const askMedia =
@@ -114,13 +125,15 @@ export default function Pill() {
           ? "compose"
           : waiting.length > 0
             ? "approve"
-            : (moment === "needs" || moment === "working" || moment === "thinking") && card
+            : focusCard
+              ? focusCard.active
                 ? "work"
-                : (moment === "done" || moment === "failed") && card
-                  ? "result"
-                  : askMedia
-                    ? "media"
-                    : "compose";
+                : "result"
+              : (moment === "done" || moment === "failed") && card
+                ? "result"
+                : askMedia
+                  ? "media"
+                  : "hub";
   const showing = expanded ? view : "collapsed";
 
   function expand() {
@@ -129,10 +142,12 @@ export default function Pill() {
 
   function collapse() {
     // Opening a result is looking at it, so it settles back to rest.
-    if (expanded && view === "result" && card) markSeen(seenKey(card));
+    if (expanded && view === "result" && subject) markSeen(seenKey(subject));
     setExpanded(false);
     setOverride(null);
     setAsking(null);
+    setFocus(null);
+    setTarget(null);
   }
 
   // Clicking anywhere else on the desktop tucks the island away; Escape does too.
@@ -174,6 +189,12 @@ export default function Pill() {
   // Which apps are connected takes Claude Code a few seconds to check, so @ mentions ask once, early.
   useEffect(() => {
     if (expanded && apps === null) invoke<App[]>("list_apps").then(setApps, () => setApps([]));
+  }, [expanded]);
+
+  // Which agent CLIs are installed: checked at start and again whenever the island opens, so
+  // installing one shows up without a restart.
+  useEffect(() => {
+    invoke<CliStatus[]>("cli_status").then(setClis, () => setClis([]));
   }, [expanded]);
 
   async function saveSettings(next: Settings) {
@@ -231,7 +252,7 @@ export default function Pill() {
     setPlanning(true);
     setError(null);
     try {
-      const next = await invoke<Preview>("preview_task", { prompt, folder, attachments });
+      const next = await invoke<Preview>("preview_task", { prompt, folder, attachments, agent });
       setPlanned({ key: planKey, preview: next });
       return next;
     } catch (err) {
@@ -259,11 +280,14 @@ export default function Pill() {
     setStarting(true);
     setError(null);
     try {
-      await invoke<RunSummary>("start_task", { prompt, folder, attachments });
+      const run = await invoke<RunSummary>("start_task", { prompt, folder, attachments, agent });
       setPrompt("");
       setContext([]);
       setPlanned(null);
       setOverride(null);
+      setTarget(null);
+      // Show the new run in detail; the back arrow returns to the grid with the others running.
+      setFocus(run.id);
     } catch (err) {
       setError(String(err));
       setOverride("compose");
@@ -278,7 +302,7 @@ export default function Pill() {
     setAsking(null);
     setOverride("compose");
     if (!allowed) return;
-    const next = await invoke<Preview>("preview_task", { prompt, folder, attachments }).catch(() => null);
+    const next = await invoke<Preview>("preview_task", { prompt, folder, attachments, agent }).catch(() => null);
     if (next) setPlanned({ key: planKey, preview: next });
     if (next && (!next.capability || next.capabilityGranted)) await start();
   }
@@ -289,13 +313,22 @@ export default function Pill() {
   }
 
   function review() {
-    if (!card) return;
-    markSeen(seenKey(card));
-    openDesk(reviewView(card));
+    if (!subject) return;
+    markSeen(seenKey(subject));
+    openDesk(reviewView(subject));
   }
 
   function dismiss() {
-    if (card) markSeen(seenKey(card));
+    if (subject) markSeen(seenKey(subject));
+    setFocus(null);
+  }
+
+  /** A tile was chosen: look at its live work or fresh result, otherwise open a goal for that agent. */
+  function pickTile(id: HubId, picked: (typeof cards)[number] | null) {
+    if (picked) return setFocus(picked.key);
+    if ((id === "claude" || id === "gemini") && !clis.find((c) => c.id === id)?.version) return openDesk("boundaries");
+    setTarget(id);
+    setOverride("compose");
   }
 
   return (
@@ -316,6 +349,7 @@ export default function Pill() {
                 approval={moment === "needs" ? card?.approvals[0] ?? null : null}
                 media={media}
                 notionParent={settings?.notionParent ?? null}
+                now={now}
                 onOpen={expand}
                 onReview={review}
                 onControl={controlMedia}
@@ -342,11 +376,29 @@ export default function Pill() {
                 notionParent={settings?.notionParent ?? null}
                 onRemember={remember}
               />
-            ) : view === "work" && card ? (
-              <WorkCard card={card} others={crew} feed={board.feed} now={now} onDesk={openDesk} onNew={() => setOverride("compose")} />
-            ) : view === "result" && card ? (
+            ) : view === "hub" ? (
+              <Hub
+                cards={cards}
+                seen={seen}
+                feed={board.feed}
+                clis={clis}
+                onPick={pickTile}
+                onDesk={() => openDesk("today")}
+                onQuit={() => invoke("quit_app")}
+              />
+            ) : view === "work" && subject ? (
+              <WorkCard
+                card={subject}
+                others={crewOf(cards, subject)}
+                feed={board.feed}
+                now={now}
+                onDesk={openDesk}
+                onBack={() => setFocus(null)}
+                onNew={() => setOverride("compose")}
+              />
+            ) : view === "result" && subject ? (
               <ResultCard
-                card={card}
+                card={subject}
                 notionParent={settings?.notionParent ?? null}
                 suggested={suggested}
                 onDismiss={dismiss}
@@ -370,10 +422,15 @@ export default function Pill() {
                 preview={preview}
                 busy={planning || starting}
                 error={error}
-                onEnter={() => (preview ? go() : plan())}
+                onEnter={go}
                 onGo={go}
                 onDesk={() => openDesk("today")}
                 onQuit={() => invoke("quit_app")}
+                agent={target}
+                onBack={() => {
+                  setOverride(null);
+                  setTarget(null);
+                }}
               />
             )}
           </div>

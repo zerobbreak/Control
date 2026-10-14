@@ -54,6 +54,138 @@ body,
     0 0 0 1px var(--needs-ring),
     0 6px 16px rgba(0, 0, 0, 0.45);
 }
+/* A soft breathing ring while an agent works, so the island looks alive from across the room. */
+.island.working,
+.island.thinking {
+  animation: mc-breathe 2.4s ease-in-out infinite;
+}
+.island.thinking {
+  animation-duration: 3.2s;
+}
+@keyframes mc-breathe {
+  0%,
+  100% {
+    box-shadow:
+      0 0 0 1px color-mix(in srgb, var(--working) 10%, transparent),
+      0 6px 16px rgba(0, 0, 0, 0.45);
+  }
+  50% {
+    box-shadow:
+      0 0 0 1px color-mix(in srgb, var(--working) 55%, transparent),
+      0 6px 22px color-mix(in srgb, var(--working) 22%, rgba(0, 0, 0, 0.45));
+  }
+}
+.island.done {
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--done) 40%, transparent),
+    0 6px 16px rgba(0, 0, 0, 0.45);
+}
+.island-time {
+  flex: none;
+  font-size: 11px;
+  color: var(--muted);
+}
+.live-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-right: 6px;
+  border-radius: 3px;
+  background: var(--working);
+  vertical-align: middle;
+  animation: mc-pulse 1.2s ease-in-out infinite;
+}
+.live-dot.thinking {
+  background: var(--text-2);
+}
+.live-dot.needs {
+  background: var(--needs);
+}
+
+/* A finished answer, read on the card: scrolls past about ten lines instead of growing the island. */
+.answer {
+  max-height: 220px;
+  overflow-y: auto;
+  padding: 10px 12px;
+  border-radius: var(--radius-m);
+  background: var(--surface);
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-2);
+  user-select: text;
+  scrollbar-width: thin;
+}
+.answer p {
+  margin: 0 0 8px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.answer p:last-child {
+  margin-bottom: 0;
+}
+
+/* What the agent just did, newest at the bottom, the live one spinning. */
+.activity {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: var(--radius-m);
+  list-style: none;
+  background: var(--surface);
+  font-size: 12px;
+  color: var(--detail);
+}
+.activity li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  animation: mc-arrive 180ms ease-out;
+}
+.activity-mark {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 12px;
+  height: 12px;
+  font-size: 11px;
+  line-height: 1;
+  color: var(--done);
+}
+.activity li.failed .activity-mark {
+  color: var(--failed);
+}
+.activity li.current .activity-mark {
+  border: 1.5px solid color-mix(in srgb, var(--working) 30%, transparent);
+  border-top-color: var(--working);
+  border-radius: 50%;
+  animation: mc-spin 0.8s linear infinite;
+}
+.activity-text {
+  flex: 1;
+}
+.activity-tool {
+  color: var(--text-2);
+}
+.activity .mono {
+  font-size: 11px;
+}
+.activity li.current .activity-tool {
+  color: var(--working-ink);
+}
+.activity-ago {
+  flex: none;
+  font-size: 11px;
+  color: var(--faint);
+}
+@keyframes mc-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
 
 /* Laid out at its natural size and measured; the island morphs to match. */
 .island-content {
@@ -169,6 +301,110 @@ button:disabled {
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--muted);
+}
+
+/* ---------- Hub: mascot on the left, a 2x2 grid of agents on the right ---------- */
+.card.hub {
+  flex-direction: row;
+  align-items: stretch;
+  gap: 12px;
+}
+.hub-mascot {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 104px;
+  padding: 10px 6px;
+  border-radius: var(--radius-l);
+  background: var(--surface);
+  text-align: center;
+}
+.hub-mascot > strong {
+  margin-top: 8px;
+  font-size: 12px;
+  font-weight: 600;
+}
+.hub-summary {
+  font-size: 11px;
+  color: var(--muted);
+}
+.hub-summary.busy {
+  color: var(--working-ink);
+}
+.hub-tools {
+  display: flex;
+  gap: 4px;
+  margin-top: 4px;
+}
+.hub-grid {
+  display: grid;
+  flex: 1;
+  grid-template-columns: 1fr 1fr;
+  grid-auto-rows: 1fr;
+  gap: 6px;
+  min-width: 0;
+}
+.tile {
+  --a: var(--faint);
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid color-mix(in srgb, var(--a) 22%, transparent);
+  border-radius: var(--radius-m);
+  background: linear-gradient(145deg, color-mix(in srgb, var(--a) 16%, var(--surface)), var(--surface) 70%);
+  color: var(--text);
+  text-align: left;
+  transition: border-color 150ms ease, transform 150ms ease;
+}
+.tile:hover {
+  border-color: color-mix(in srgb, var(--a) 55%, transparent);
+  transform: translateY(-1px);
+}
+.tile.claude { --a: #f7701d; }
+.tile.gemini { --a: #4b8cf7; }
+.tile.browser { --a: #14b981; }
+.tile.assistant { --a: #8b5cf6; }
+.tile .mc-face {
+  margin-bottom: 4px;
+}
+.tile-name {
+  font-size: 13px;
+  font-weight: 600;
+}
+.tile-line {
+  max-width: 100%;
+  font-size: 11px;
+  color: var(--detail);
+}
+.tile-state {
+  font-size: 10px;
+  color: var(--faint);
+}
+.tile.live {
+  border-color: color-mix(in srgb, var(--a) 60%, transparent);
+  animation: mc-tile-glow 2.2s ease-in-out infinite;
+}
+.tile.live .tile-line {
+  color: var(--text-2);
+}
+.tile.result .tile-line {
+  color: var(--done-ink);
+}
+.tile.missing {
+  opacity: 0.5;
+  filter: grayscale(0.7);
+}
+@keyframes mc-tile-glow {
+  50% {
+    box-shadow: 0 0 14px color-mix(in srgb, var(--a) 35%, transparent);
+  }
 }
 
 /* Other busy agents ride along on the right, coloured by their state. */
@@ -684,6 +920,12 @@ button:disabled {
     transition: none;
   }
   .moment,
+  .island.working,
+  .island.thinking,
+  .tile.live,
+  .live-dot,
+  .activity li,
+  .activity li.current .activity-mark,
   .progress .current,
   .now-playing.playing .bars span {
     animation: none;

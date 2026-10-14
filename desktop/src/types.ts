@@ -98,6 +98,8 @@ export type PendingApproval = {
 /** Mirrors backend/src/settings.rs: what the user lets Mission Control and its agents do. */
 export type Settings = {
   claudeEnabled: boolean;
+  /** Which CLI takes code goals and questions about folders. */
+  codingAgent: "claude" | "gemini";
   assistantEnabled: boolean;
   /** Where new Notion pages go when a goal does not say. */
   notionParent: string | null;
@@ -205,3 +207,6 @@ export type Preview = {
 
 export type NowPlaying = { title: string; artist: string | null; app: string; playing: boolean };
 export type MediaAction = "playPause" | "next" | "previous" | "volumeUp" | "volumeDown" | "mute";
+
+/** A coding CLI Mission Control can start; `version` is null when it is not installed. */
+export type CliStatus = { id: "claude" | "gemini"; name: string; version: string | null };

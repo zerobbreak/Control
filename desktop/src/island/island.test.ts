@@ -9,6 +9,8 @@ import {
   crewOf,
   currentAction,
   failReason,
+  hubOf,
+  hubTiles,
   islandCards,
   islandMoment,
   lookOffset,
@@ -251,5 +253,27 @@ describe("window sizing", () => {
     expect(lookOffset(0, 0)).toEqual({ x: 0, y: 0 });
     expect(lookOffset(1000, 0)).toEqual({ x: 1.5, y: 0 });
     expect(lookOffset(60, 0).x).toBeCloseTo(0.75);
+  });
+});
+
+describe("the hub", () => {
+  const gemini = { ...run("g", "running"), agent: "gemini" } as RunSummary;
+
+  it("gives each run to its agent's tile", () => {
+    const all = cards([run("c", "running"), gemini, run("b", "running", "browse"), run("a", "running", "assistant")]);
+    expect(all.map(hubOf).sort()).toEqual(["assistant", "browser", "claude", "gemini"]);
+  });
+
+  it("lets Claude and Gemini both be busy at once", () => {
+    const tiles = hubTiles(cards([run("c", "running"), gemini]), new Set());
+    expect(tiles.claude?.key).toBe("c");
+    expect(tiles.gemini?.key).toBe("g");
+    expect(tiles.browser).toBeNull();
+  });
+
+  it("shows a result until it has been looked at, then the tile is ready again", () => {
+    const finished = cards([run("c", "finished", "code", "All done")]);
+    expect(hubTiles(finished, new Set()).claude?.key).toBe("c");
+    expect(hubTiles(finished, new Set(["c"])).claude).toBeNull();
   });
 });

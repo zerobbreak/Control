@@ -18,6 +18,8 @@ use crate::router::{TaskKind, Tier};
 pub struct Settings {
     /// Whether Mission Control may start Claude Code on code and questions about folders.
     pub claude_enabled: bool,
+    /// Which CLI takes code goals and questions about folders.
+    pub coding_agent: CodingAgent,
     /// Whether Mission Control may start the assistant on errands in apps and dropped files.
     pub assistant_enabled: bool,
     /// Where new Notion pages go when a goal does not say, such as a page name or link.
@@ -62,6 +64,14 @@ pub struct Settings {
     pub capabilities: BTreeMap<Capability, bool>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CodingAgent {
+    #[default]
+    Claude,
+    Gemini,
+}
+
 /// Things Mission Control can do on the computer that the user must allow first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -89,6 +99,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             claude_enabled: true,
+            coding_agent: CodingAgent::Claude,
             assistant_enabled: true,
             notion_parent: None,
             read_apps_freely: true,

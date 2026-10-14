@@ -3,7 +3,7 @@
 
 import { useRef, useState, type KeyboardEvent } from "react";
 import { insertMention, mentionAt, mentionOptions, type Mention } from "./context";
-import { Face, RoleGlyph } from "./Face";
+import { Face, RoleGlyph, type Tint } from "./Face";
 import { Icon, type ICONS } from "./Icon";
 import { planLine } from "./island/island";
 import type { App, ContextItem, Preview } from "./types";
@@ -38,6 +38,10 @@ type ComposeProps = {
   onGo: () => void;
   onDesk: () => void;
   onQuit: () => void;
+  /** The agent this goal was opened for, which tints the face. */
+  agent?: Tint | null;
+  /** Back to the agent grid. */
+  onBack?: () => void;
 };
 
 /**
@@ -45,7 +49,7 @@ type ComposeProps = {
  * name into the goal, which is also how the router tells an errand in Notion from code work.
  */
 export function ComposeCard(props: ComposeProps) {
-  const { prompt, onPrompt, context, project, onRemove, onBrowse, apps, preview, busy, error, onEnter, onGo, onDesk, onQuit } = props;
+  const { prompt, onPrompt, context, project, onRemove, onBrowse, apps, preview, busy, error, onEnter, onGo, onDesk, onQuit, agent, onBack } = props;
   const field = useRef<HTMLTextAreaElement>(null);
   const [caret, setCaret] = useState(0);
   const [highlight, setHighlight] = useState(0);
@@ -103,7 +107,7 @@ export function ComposeCard(props: ComposeProps) {
       }}
     >
       <header className="card-head">
-        <Face state={busy ? "thinking" : "idle"} />
+        <Face state={busy ? "thinking" : "idle"} tint={agent ?? undefined} />
         <span className="chips">
           {shown.map((item) => (
             <span key={item.path} className={`chip ${item.path === project ? "project" : ""} ${item.kind === "missing" ? "missing" : ""}`} title={`${item.path}\n${item.detail}`}>
@@ -120,6 +124,11 @@ export function ComposeCard(props: ComposeProps) {
             </span>
           )}
         </span>
+        {onBack && (
+          <button type="button" className="icon-btn" aria-label="All agents" title="All agents" onClick={onBack}>
+            <Icon name="back" size={13} />
+          </button>
+        )}
         <button type="button" className="icon-btn meta" aria-label="Add a file or folder" aria-expanded={adding} onClick={() => setAdding(!adding)}>
           <Icon name={adding ? "x" : "plus"} size={13} />
         </button>
@@ -194,9 +203,9 @@ export function ComposeCard(props: ComposeProps) {
             {plan.text}
           </span>
         ) : busy ? (
-          <span className="plan hint" role="status">Working out who should do this…</span>
+          <span className="plan hint" role="status">Picking the right agent and starting…</span>
         ) : (
-          <span className="plan hint">{prompt.trim() ? "Enter to see who will do it" : "@ for apps and files"}</span>
+          <span className="plan hint">{prompt.trim() ? "Enter to start" : "@ for apps and files"}</span>
         )}
         <button type="submit" className="btn primary go" disabled={!prompt.trim() || busy} aria-busy={busy}>
           Go

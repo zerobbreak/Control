@@ -21,7 +21,7 @@ use crate::apps::{self, AppAccess};
 use crate::events::AgentKind;
 use crate::router::{self, Access, Decision, TaskKind, Tier};
 use crate::git::{self, GitAction, GitRepo};
-use crate::settings::{Capability, GitRule, Settings};
+use crate::settings::{Capability, CodingAgent, GitRule, Settings};
 
 pub struct RuntimeConfig {
     /// One log file per run, holding everything the agent wrote.
@@ -156,6 +156,8 @@ struct Run {
     started: Instant,
     /// A readiness probe is out and has not been answered yet.
     probing: bool,
+    /// Server ids of the connectors the goal named; empty when it could use any.
+    target_apps: Vec<&'static str>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -264,7 +266,12 @@ impl Orchestrator {
 
     /// `preview` with a decision already made, such as one from the model router.
     pub fn preview_routed(&self, goal: &str, folder: Option<&Path>, attachments: &[PathBuf], routed: Decision) -> Result<Preview, StartError> {
-        let (workdir, decision, agent) = self.plan(goal, folder, attachments, routed)?;
+        self.preview_with(goal, folder, attachments, routed, None)
+    }
+
+    /// `preview_routed` for a goal given to a particular coding CLI, such as one picked on the island.
+    pub fn preview_with(&self, goal: &str, folder: Option<&Path>, attachments: &[PathBuf], routed: Decision, prefer: Option<CodingAgent>) -> Result<Preview, StartError> {
+        let (workdir, decision, agent) = self.plan(goal, folder, attachments, routed, prefer)?;
         let capability = needed_capability(Some(decision.task));
         Ok(Preview {
             model: agent.model(decision.tier).to_string(),
@@ -285,6 +292,7 @@ impl Orchestrator {
         folder: Option<&Path>,
         attachments: &[PathBuf],
         routed: Decision,
+        prefer: Option<CodingAgent>,
     ) -> Result<(PathBuf, Decision, Arc<dyn Agent>), StartError> {
         let goal = goal.trim();
         if goal.is_empty() {
@@ -314,7 +322,15 @@ impl Orchestrator {
         if !self.settings.allows_task(decision.task) {
             return Err(StartError::NoAgent(decision));
         }
-        let Some(agent) = self.agents.iter().find(|a| a.handles(decision.task)).cloned() else {
+        let wants_gemini = matches!(decision.task, TaskKind::Code | TaskKind::Question) && prefer.unwrap_or(self.settings.coding_agent) == CodingAgent::Gemini;
+        let chosen = self
+            .agents
+            .iter()
+            .filter(|a| a.handles(decision.task))
+            .find(|a| !wants_gemini || a.kind() == AgentKind::Gemini)
+            .or_else(|| self.agents.iter().find(|a| a.handles(decision.task)))
+            .cloned();
+        let Some(agent) = chosen else {
             return Err(StartError::NoAgent(decision));
         };
         Ok((workdir, decision, agent))
@@ -328,7 +344,13 @@ impl Orchestrator {
 
     /// `start` with a decision already made, such as the one the user just reviewed.
     pub fn start_routed(&mut self, goal: &str, folder: Option<&Path>, attachments: &[PathBuf], routed: Decision) -> Result<RunSummary, StartError> {
-        let (workdir, decision, agent) = self.plan(goal, folder, attachments, routed)?;
+        self.start_with(goal, folder, attachments, routed, None)
+    }
+
+    /// `start_routed` for a goal given to a particular coding CLI. Runs are independent, so
+    /// Claude and Gemini can each have goals going at the same time.
+    pub fn start_with(&mut self, goal: &str, folder: Option<&Path>, attachments: &[PathBuf], routed: Decision, prefer: Option<CodingAgent>) -> Result<RunSummary, StartError> {
+        let (workdir, decision, agent) = self.plan(goal, folder, attachments, routed, prefer)?;
         // Asking is the pill's job; the runtime only checks the answer.
         if let Some(capability) = needed_capability(Some(decision.task)) {
             if self.settings.capability(capability) != Some(true) {
@@ -341,6 +363,7 @@ impl Orchestrator {
         }
 
         let id = uuid::Uuid::new_v4().to_string();
+        let target_apps: Vec<&'static str> = apps::target_apps(goal).iter().map(|c| c.id).collect();
         let launch = Launch {
             session_id: &id,
             goal,
@@ -352,6 +375,7 @@ impl Orchestrator {
             max_budget_usd: self.settings.max_budget_usd,
             notion_parent: self.settings.notion_parent.as_deref(),
             read_apps_freely: self.settings.read_apps_freely,
+            target_apps: &target_apps,
         };
         fs::create_dir_all(&self.config.runs_dir).map_err(StartError::Spawn)?;
         let log_path = self.config.runs_dir.join(format!("{id}.log"));
@@ -366,9 +390,12 @@ impl Orchestrator {
             Some(probe) => (probe, Some(goal_line), RunStatus::Starting),
             None => (goal_line, None, RunStatus::Running),
         };
-        if let Err(err) = writeln!(stdin, "{first_line}") {
-            let _ = child.kill();
-            return Err(StartError::Spawn(err));
+        // An agent that runs alone was given its goal on the command line.
+        if !agent.single_shot() {
+            if let Err(err) = writeln!(stdin, "{first_line}") {
+                let _ = child.kill();
+                return Err(StartError::Spawn(err));
+            }
         }
         spawn_reader(id.clone(), agent.clone(), stdout, log, self.outbox.clone());
 
@@ -391,14 +418,17 @@ impl Orchestrator {
             auto_denied: 0,
         };
         let probing = waiting_goal.is_some();
+        let single_shot = agent.single_shot();
         self.runs.push(Run {
             summary: summary.clone(),
             agent,
             child: Some(child),
-            stdin: Some(stdin),
+            // An agent that runs alone has had its goal; closing its input is what lets it begin.
+            stdin: if single_shot { None } else { Some(stdin) },
             waiting_goal,
             started: Instant::now(),
             probing,
+            target_apps,
         });
         Ok(summary)
     }
@@ -444,10 +474,17 @@ impl Orchestrator {
             let Some(run) = self.runs.iter_mut().find(|r| r.summary.id == run_id) else { continue };
             match message {
                 HostMessage::Finished(result) => {
-                    run.summary.result = result;
+                    if result.is_some() {
+                        run.summary.result = result;
+                    }
                     run.stdin = None;
                 }
                 HostMessage::Ready(apps) => {
+                    // Only the services the goal named matter; the rest were kept out of the run.
+                    let apps: Vec<_> = apps
+                        .into_iter()
+                        .filter(|a| run.target_apps.is_empty() || run.target_apps.contains(&apps::server_id(&format!("claude.ai {}", a.name)).as_str()))
+                        .collect();
                     let settled = connections_settled(&apps);
                     run.summary.connections = apps;
                     if settled {

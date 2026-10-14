@@ -102,6 +102,101 @@
   40% { opacity: 1; }
 }
 
+/* Agents wear the same face in their own gradient. */
+.mc-face.large { gap: 8px; }
+.mc-face.large .mc-eye { width: 15px; height: 23px; border-radius: 8px; }
+.mc-face.tint-claude .mc-eye { background: linear-gradient(160deg, #ffc08a, #f7701d 55%, #c2410c); }
+.mc-face.tint-gemini .mc-eye { background: linear-gradient(160deg, #a9caff, #4b8cf7 55%, #2a56d6); }
+.mc-face.tint-browser .mc-eye { background: linear-gradient(160deg, #8cf0c4, #14b981 55%, #047857); }
+.mc-face.tint-assistant .mc-eye { background: linear-gradient(160deg, #cdbfff, #8b5cf6 55%, #6d28d9); }
+
+/* Each state moves differently, so the face reads at a glance without a word of text.
+   Eyes use the independent `translate` and `scale` properties, leaving `transform` free for
+   the look-at-cursor offset. */
+.mc-face .mc-eye {
+  transform-origin: center;
+}
+.mc-face.idle .mc-eye {
+  animation: mc-idle-blink 5s infinite;
+}
+.mc-face.thinking .mc-eye {
+  animation: mc-ponder 2.4s infinite ease-in-out;
+}
+.mc-face.thinking .mc-eye:last-child {
+  animation-delay: 0.15s;
+}
+.mc-face.working .mc-eye {
+  animation: mc-scan 1.4s infinite ease-in-out;
+}
+.mc-face.working .mc-eye:last-child {
+  animation-direction: reverse;
+}
+.mc-face.working .mc-glyph {
+  animation: mc-typing 1.1s infinite steps(2, jump-none);
+}
+.mc-face.needs .mc-eye {
+  animation: mc-alert 1.2s infinite ease-in-out;
+}
+.mc-face.needs .mc-glyph {
+  animation: mc-knock 1.2s infinite ease-in-out;
+}
+.mc-face.done .mc-eye {
+  animation: mc-pop 0.5s 1 ease-out;
+}
+.mc-face.done .mc-check {
+  stroke-dasharray: 1;
+  animation: mc-draw 0.45s 0.1s 1 both ease-out;
+}
+.mc-face.failed .mc-eye {
+  animation: mc-shake 0.4s 1;
+}
+
+@keyframes mc-idle-blink {
+  0%, 94%, 100% { scale: 1 1; }
+  97% { scale: 1 0.1; }
+}
+@keyframes mc-ponder {
+  0%, 100% { translate: 0 0; scale: 1 1; }
+  30% { translate: 0 -1.5px; }
+  45% { scale: 1 0.15; }
+  55% { scale: 1 1; }
+  70% { translate: 0 -1.5px; }
+}
+@keyframes mc-scan {
+  0%, 100% { translate: -1.5px 0; scale: 1 0.8; }
+  50% { translate: 1.5px 0; scale: 1 0.8; }
+}
+@keyframes mc-typing {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+@keyframes mc-alert {
+  0%, 100% { scale: 1 1; }
+  50% { scale: 1.12 1.2; }
+}
+@keyframes mc-knock {
+  0%, 100% { translate: 0 0; }
+  20% { translate: 0 -2px; }
+  40% { translate: 0 0; }
+}
+@keyframes mc-pop {
+  0% { scale: 1 0.2; }
+  60% { scale: 1.2 1.2; }
+  100% { scale: 1 1; }
+}
+@keyframes mc-draw {
+  from { stroke-dashoffset: 1; }
+  to { stroke-dashoffset: 0; }
+}
+@keyframes mc-shake {
+  0%, 100% { translate: 0 0; }
+  25% { translate: -2px 0; }
+  75% { translate: 2px 0; }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .mc-face .mc-dots span { animation: none; opacity: 0.7; }
+  .mc-face .mc-eye,
+  .mc-face .mc-glyph,
+  .mc-face .mc-check { animation: none; }
 }

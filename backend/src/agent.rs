@@ -8,6 +8,7 @@ use std::process::Command;
 use serde::Serialize;
 use serde_json::{Value, json};
 
+use crate::apps::CONNECTORS;
 use crate::events::{AgentKind, summarize_tool_input, truncate};
 use crate::router::{Access, TaskKind, Tier};
 
@@ -29,6 +30,9 @@ pub struct Launch<'a> {
     pub notion_parent: Option<&'a str>,
     /// Searching and opening in connected apps runs without asking.
     pub read_apps_freely: bool,
+    /// Server ids of the connectors the goal names. When set, every other known connector is
+    /// kept out of the run, so only these load and connect.
+    pub target_apps: &'a [&'static str],
 }
 
 /// An agent asking to use a tool its permission mode does not already allow.
@@ -92,6 +96,11 @@ pub trait Agent: Send + Sync {
     /// connect to apps first. The answer comes back as `HostMessage::Ready`.
     fn readiness_probe(&self) -> Option<String> {
         None
+    }
+    /// Whether the agent takes its goal once and then runs alone, with no way to ask Mission
+    /// Control for permission mid-run. Its input is closed after the goal.
+    fn single_shot(&self) -> bool {
+        false
     }
     /// The stdin line that hands the agent its goal and any attachments.
     fn goal_message(&self, goal: &str, attachments: &[PathBuf]) -> String;
@@ -203,6 +212,90 @@ impl Agent for ClaudeCode {
     }
 }
 
+/// Google's Antigravity CLI (`agy`, the Gemini coding agent) working in a folder. It runs headless:
+/// the goal goes on its command line, and it has no channel for asking Mission Control about a
+/// permission, so it may only read, or edit files when edits are allowed. Anything that needs a
+/// command or other approval is denied by the CLI itself and reported back in its result.
+pub struct GeminiCli;
+
+/// The program the Gemini agent is started with.
+pub const GEMINI_PROGRAM: &str = "agy";
+
+const GEMINI_NOTE: &str = "\n\n(You are running headless inside Mission Control: you cannot run shell \
+commands. Read and search with your file tools, and say plainly if something needs a command.)";
+
+impl Agent for GeminiCli {
+    fn kind(&self) -> AgentKind {
+        AgentKind::Gemini
+    }
+
+    fn handles(&self, task: TaskKind) -> bool {
+        matches!(task, TaskKind::Code | TaskKind::Question)
+    }
+
+    fn model(&self, tier: Tier) -> &'static str {
+        match tier {
+            Tier::Fast => "gemini-3.8-flash-low",
+            Tier::Balanced => "gemini-3.8-flash-medium",
+            Tier::Strongest => "gemini-3.8-flash-high",
+        }
+    }
+
+    fn command(&self, launch: &Launch) -> Command {
+        let mut cmd = Command::new(GEMINI_PROGRAM);
+        cmd.current_dir(launch.workdir)
+            .args(["--output-format", "stream-json"])
+            .args(["--model", self.model(launch.tier)]);
+        // Edits go ahead only when this run may edit and the user has not asked to approve each one.
+        if launch.access == Access::EditFiles && !launch.ask_before_edits {
+            cmd.args(["--mode", "accept-edits"]);
+        }
+        for dir in attachment_dirs(launch.attachments) {
+            cmd.arg("--add-dir").arg(dir);
+        }
+        // The prompt must be attached to the flag; `--print` would take the next flag as the prompt.
+        let prompt = format!("{}{GEMINI_NOTE}", goal_text(launch.goal, launch.attachments));
+        cmd.arg(format!("--print={prompt}"));
+        cmd
+    }
+
+    fn single_shot(&self) -> bool {
+        true
+    }
+
+    fn goal_message(&self, _goal: &str, _attachments: &[PathBuf]) -> String {
+        // The goal is on the command line, not stdin.
+        String::new()
+    }
+
+    fn parse(&self, line: &str) -> Option<HostMessage> {
+        let message: Value = serde_json::from_str(line).ok()?;
+        if message["event"] != "result" {
+            return None;
+        }
+        let result = &message["result"];
+        let response = result["response"].as_str().unwrap_or_default().trim();
+        if !response.is_empty() {
+            return Some(HostMessage::Finished(Some(response.to_string())));
+        }
+        // Nothing said: usually because it wanted to run something it may not.
+        let denied: Vec<&str> = result["denied_actions"]
+            .as_array()
+            .map(|a| a.iter().filter_map(|d| d["display_name"].as_str()).collect())
+            .unwrap_or_default();
+        Some(HostMessage::Finished(Some(if denied.is_empty() {
+            "Gemini finished without an answer.".to_string()
+        } else {
+            format!("Gemini needed to do something Mission Control doesn't allow in a headless run ({}), so it stopped.", denied.join(", "))
+        })))
+    }
+
+    fn reply(&self, _request: &ApprovalRequest, _answer: &Answer) -> String {
+        // Never asked: the CLI has no channel for permission requests.
+        String::new()
+    }
+}
+
 /// Connector tools that only read, so they run without asking. Anything that creates, changes
 /// or sends still comes to the user for approval.
 const READ_ONLY_CONNECTOR_TOOLS: &[&str] = &[
@@ -256,6 +349,18 @@ impl Agent for ClaudeAssistant {
             cmd.env("ENABLE_CLAUDEAI_MCP_SERVERS", "false");
         }
         cmd.args(["--tools", "Read,Glob,Grep"]).args(["--append-system-prompt", &prompt]);
+        // A goal that names its services gets only those: the rest are blocked, which also keeps
+        // their tool definitions out of the model's context.
+        if !launch.target_apps.is_empty() {
+            let blocked: Vec<String> = CONNECTORS
+                .iter()
+                .filter(|c| !launch.target_apps.contains(&c.id))
+                .map(|c| format!("mcp__{}", c.id))
+                .collect();
+            if !blocked.is_empty() {
+                cmd.arg("--disallowedTools").arg(blocked.join(","));
+            }
+        }
         // Reading in apps runs freely unless the user wants every app request to ask.
         if launch.read_apps_freely {
             cmd.arg("--allowedTools").arg(READ_ONLY_CONNECTOR_TOOLS.join(","));
@@ -322,6 +427,11 @@ fn attachment_dirs(attachments: &[PathBuf]) -> Vec<PathBuf> {
 }
 
 fn claude_goal_message(goal: &str, attachments: &[PathBuf]) -> String {
+    json!({"type": "user", "message": {"role": "user", "content": goal_text(goal, attachments)}}).to_string()
+}
+
+/// The goal with the files and folders the user handed over listed after it.
+fn goal_text(goal: &str, attachments: &[PathBuf]) -> String {
     let mut content = goal.to_string();
     if !attachments.is_empty() {
         content.push_str("\n\nAttached:");
@@ -340,7 +450,7 @@ fn claude_goal_message(goal: &str, attachments: &[PathBuf]) -> String {
             }
         }
     }
-    json!({"type": "user", "message": {"role": "user", "content": content}}).to_string()
+    content
 }
 
 fn claude_parse(line: &str) -> Option<HostMessage> {
@@ -450,6 +560,7 @@ mod tests {
             max_budget_usd: None,
             notion_parent: None,
             read_apps_freely: true,
+            target_apps: &[],
         }
     }
 
@@ -624,5 +735,38 @@ mod tests {
 
         let deny: Value = serde_json::from_str(&ClaudeCode.reply(&request, &Answer::Deny("No".into()))).unwrap();
         assert_eq!(deny["response"]["response"], json!({"behavior": "deny", "message": "No"}));
+    }
+
+    #[test]
+    fn a_named_service_keeps_the_other_connectors_out() {
+        let mut named = launch(Access::UseApps);
+        named.target_apps = &["claude_ai_Notion"];
+        let args = args(&ClaudeAssistant.command(&named));
+        let blocked = after(&args, "--disallowedTools").expect("the others are blocked");
+        assert!(blocked.contains("mcp__claude_ai_Gmail") && !blocked.contains("claude_ai_Notion"));
+        assert_eq!(after(&self::args(&ClaudeAssistant.command(&launch(Access::UseApps))), "--disallowedTools"), None, "no service named, all available");
+    }
+
+    #[test]
+    fn gemini_runs_through_agy_with_the_goal_on_its_command_line() {
+        let read = args(&GeminiCli.command(&launch(Access::ReadOnly)));
+        assert_eq!(after(&read, "--output-format"), Some("stream-json"));
+        assert_eq!(after(&read, "--mode"), None, "plan mode writes plan files, so reads use the default");
+        let prompt = read.iter().find_map(|a| a.strip_prefix("--print=")).expect("prompt attached to the flag");
+        assert!(prompt.starts_with("fix the login"));
+        let edit = args(&GeminiCli.command(&launch(Access::EditFiles)));
+        assert_eq!(after(&edit, "--mode"), Some("accept-edits"));
+        assert!(GeminiCli.single_shot() && !ClaudeCode.single_shot());
+        assert_eq!(GeminiCli.goal_message("x", &[]), "");
+    }
+
+    #[test]
+    fn gemini_answer_comes_from_its_result_event() {
+        let done = r#"{"event":"result","result":{"status":"SUCCESS","response":"  Three files.\n"}}"#;
+        assert_eq!(GeminiCli.parse(done), Some(HostMessage::Finished(Some("Three files.".into()))));
+        assert_eq!(GeminiCli.parse(r#"{"event":"step_update","step_update":{}}"#), None);
+        let denied = r#"{"event":"result","result":{"status":"SUCCESS","response":"","denied_actions":[{"display_name":"RunCommand"}]}}"#;
+        let Some(HostMessage::Finished(Some(text))) = GeminiCli.parse(denied) else { panic!("finishes") };
+        assert!(text.contains("RunCommand"));
     }
 }

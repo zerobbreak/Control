@@ -74,6 +74,7 @@ function session(status: SessionSummary["status"], extra: Partial<SessionSummary
 
 const SETTINGS = {
   claudeEnabled: true,
+  codingAgent: "claude",
   assistantEnabled: true,
   readOnlyMode: false,
   fullAutonomy: false,

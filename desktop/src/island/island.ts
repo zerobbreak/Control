@@ -56,6 +56,42 @@ export function crewOf(cards: AgentCard[], lead: AgentCard | null, max = 3): Age
   return cards.filter((c) => c.active && c !== lead).slice(0, max);
 }
 
+// ---------- The hub: one tile per agent ----------
+
+export type HubId = "claude" | "gemini" | "browser" | "assistant";
+
+/** The four tiles of the hub, in grid order. */
+export const HUB: { id: HubId; name: string; sub: string }[] = [
+  { id: "claude", name: "Claude", sub: "Claude Code" },
+  { id: "gemini", name: "Gemini", sub: "agy" },
+  { id: "browser", name: "Browser", sub: "Chrome" },
+  { id: "assistant", name: "Assistant", sub: "Your apps" },
+];
+
+/** Which tile an agent card belongs to. */
+export function hubOf(card: AgentCard): HubId {
+  const run = card.run;
+  if (run) {
+    if (run.decision.task === "browse") return "browser";
+    if (run.decision.task === "assistant") return "assistant";
+    return run.agent === "gemini" ? "gemini" : "claude";
+  }
+  return card.session?.agent === "gemini" ? "gemini" : "claude";
+}
+
+/**
+ * The card each tile shows: its live work first, else a result you have not looked at, else
+ * nothing (the tile is ready). `cards` arrive most urgent first, so the first match wins.
+ */
+export function hubTiles(cards: AgentCard[], seen: ReadonlySet<string>): Record<HubId, AgentCard | null> {
+  const tiles: Record<HubId, AgentCard | null> = { claude: null, gemini: null, browser: null, assistant: null };
+  for (const card of cards) {
+    const id = hubOf(card);
+    if (!tiles[id] && (card.active || isUnseenResult(card, seen))) tiles[id] = card;
+  }
+  return tiles;
+}
+
 // ---------- What an agent is doing ----------
 
 const EDIT_TOOLS = new Set(["Edit", "MultiEdit", "Write", "NotebookEdit"]);
@@ -190,6 +226,17 @@ export function resultSummary(text: string | null): { title: string; summary: st
   const rest = lines.slice(1).join(" ");
   const sentence = rest.match(/^.*?[.!?](\s|$)/)?.[0].trim() ?? (rest || null);
   return { title, summary: sentence };
+}
+
+/** An answer as plain paragraphs: markdown markers dropped, list dashes kept as bullets. */
+export function answerText(text: string | null): string {
+  return (text ?? "")
+    .replace(/```[a-z]*\n?/gi, "")
+    .split("\n")
+    .map((l) => l.replace(/^\s*#{1,6}\s+/, "").replace(/^(\s*)[-*]\s+/, "$1• ").replace(/\*\*|__|`/g, "").trimEnd())
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 
 /** "3 min", "45 s", "1 h 20 min": how long a finished run took. */

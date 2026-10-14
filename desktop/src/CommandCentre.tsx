@@ -17,6 +17,11 @@ const TIERS: { value: Tier; label: string; title: string }[] = [
   { value: "strongest", label: "Strongest", title: "Opus" },
 ];
 
+const CODERS: { value: Settings["codingAgent"]; label: string }[] = [
+  { value: "claude", label: "Claude Code" },
+  { value: "gemini", label: "Gemini (agy)" },
+];
+
 const GIT_RULES: { value: GitRule; label: string }[] = [
   { value: "ask", label: "Ask" },
   { value: "allow", label: "Allow" },
@@ -132,12 +137,23 @@ export default function CommandCentre({ onViewAllSessions }: { onViewAllSessions
               <span className="bd-glyph">
                 <RoleGlyph role="code" size={12} />
               </span>
-              Coding agent <span className="bd-sub">Claude Code</span>
+              Coding agent <span className="bd-sub">{settings.codingAgent === "gemini" ? "Gemini (agy)" : "Claude Code"}</span>
             </>
           }
           description="Code and questions about your folders."
         >
           <Switch label="Coding agent" checked={settings.claudeEnabled} onChange={(claudeEnabled) => update({ claudeEnabled })} />
+        </Row>
+        <Row
+          label="Which CLI codes"
+          description="Gemini runs through the agy command. It works on its own: it can read, or edit files, but cannot ask you before running a command, so commands are refused."
+        >
+          <Segmented
+            label="Which CLI codes"
+            options={CODERS}
+            value={settings.codingAgent ?? "claude"}
+            onChange={(codingAgent) => update({ codingAgent })}
+          />
         </Row>
         <Row
           label={

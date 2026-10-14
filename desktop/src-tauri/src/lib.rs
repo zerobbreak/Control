@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use mission_control::{
-    App, Answer, Board, Decision, ModelRouter, Capability, ClaudeBrowser, ContextItem, BoardSnapshot, ClaudeAssistant, ClaudeCode, GitError, GitRepo, Orchestrator, PendingApproval, Preview, PullRequest, RepoStatus,
+    App, Answer, Board, CodingAgent, Decision, ModelRouter, Capability, ClaudeBrowser, GeminiCli, ContextItem, BoardSnapshot, ClaudeAssistant, ClaudeCode, GitError, GitRepo, Orchestrator, PendingApproval, Preview, PullRequest, RepoStatus,
     RunSummary, RuntimeConfig, Settings, TranscriptWatcher, WatcherConfig,
 };
 use tauri::{Emitter, LogicalSize, Manager, PhysicalPosition, WebviewWindow, WindowEvent};
@@ -32,15 +32,24 @@ async fn route(router: &Arc<ModelRouter>, prompt: &str, folder: &Option<PathBuf>
 /// with any files the user dropped on it.
 #[tauri::command]
 async fn start_task(
+    app: tauri::AppHandle,
     orchestrator: tauri::State<'_, SharedOrchestrator>,
     router: tauri::State<'_, Arc<ModelRouter>>,
     prompt: String,
     folder: Option<PathBuf>,
     attachments: Option<Vec<PathBuf>>,
+    agent: Option<CodingAgent>,
 ) -> Result<RunSummary, String> {
     let attachments = attachments.unwrap_or_default();
     let decision = route(&router, &prompt, &folder, &attachments).await?;
-    orchestrator.lock().unwrap().start_routed(&prompt, folder.as_deref(), &attachments, decision).map_err(|e| e.to_string())
+    let (run, runs) = {
+        let mut orchestrator = orchestrator.lock().unwrap();
+        let run = orchestrator.start_with(&prompt, folder.as_deref(), &attachments, decision, agent).map_err(|e| e.to_string())?;
+        (run, orchestrator.runs())
+    };
+    // The island reacts at once instead of waiting for the next poll to hear about the new run.
+    let _ = app.emit("runs-updated", runs);
+    Ok(run)
 }
 
 /// What `start_task` would do with the same goal, without starting anything, for the user to review.
@@ -51,10 +60,11 @@ async fn preview_task(
     prompt: String,
     folder: Option<PathBuf>,
     attachments: Option<Vec<PathBuf>>,
+    agent: Option<CodingAgent>,
 ) -> Result<Preview, String> {
     let attachments = attachments.unwrap_or_default();
     let decision = route(&router, &prompt, &folder, &attachments).await?;
-    orchestrator.lock().unwrap().preview_routed(&prompt, folder.as_deref(), &attachments, decision).map_err(|e| e.to_string())
+    orchestrator.lock().unwrap().preview_with(&prompt, folder.as_deref(), &attachments, decision, agent).map_err(|e| e.to_string())
 }
 
 /// What each dropped or picked path is, for the pill's context list. Reads only file metadata.
@@ -214,6 +224,42 @@ async fn github_create_pull_request(folder: PathBuf, title: String, body: String
     in_repo(folder, move |repo| repo.create_pull_request(&title, &body, draft)).await
 }
 
+/// A coding CLI Mission Control can start, and whether it is installed.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CliStatus {
+    id: &'static str,
+    name: &'static str,
+    /// Its `--version` line when it is installed and answers; None when it is not found.
+    version: Option<String>,
+}
+
+fn cli_version(program: &str) -> Option<String> {
+    let mut cmd = std::process::Command::new(program);
+    cmd.arg("--version");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let output = cmd.output().ok().filter(|o| o.status.success())?;
+    String::from_utf8_lossy(&output.stdout).lines().next().map(|l| l.trim().to_string()).filter(|l| !l.is_empty())
+}
+
+/// Which agent CLIs are installed, for the island's ready-to-prompt badges.
+#[tauri::command]
+async fn cli_status() -> Vec<CliStatus> {
+    tauri::async_runtime::spawn_blocking(|| {
+        vec![
+            CliStatus { id: "claude", name: "Claude", version: cli_version("claude") },
+            CliStatus { id: "gemini", name: "Gemini", version: cli_version(mission_control::GEMINI_PROGRAM) },
+        ]
+    })
+    .await
+    .unwrap_or_default()
+}
+
 #[tauri::command]
 fn runs_snapshot(orchestrator: tauri::State<SharedOrchestrator>) -> Vec<RunSummary> {
     orchestrator.lock().unwrap().runs()
@@ -333,7 +379,7 @@ pub fn run() {
         .manage(Arc::new(ModelRouter::default()))
         .setup(|app| {
             let runtime = RuntimeConfig::from_home().ok_or("could not find the home directory")?;
-            let orchestrator: SharedOrchestrator = Arc::new(Mutex::new(Orchestrator::new(runtime, vec![Arc::new(ClaudeCode), Arc::new(ClaudeAssistant), Arc::new(ClaudeBrowser)])));
+            let orchestrator: SharedOrchestrator = Arc::new(Mutex::new(Orchestrator::new(runtime, vec![Arc::new(ClaudeCode), Arc::new(ClaudeAssistant), Arc::new(ClaudeBrowser), Arc::new(GeminiCli)])));
             app.manage(orchestrator.clone());
             let board = app.state::<SharedBoard>().inner().clone();
             spawn_watcher(app.handle().clone(), board, orchestrator);
@@ -363,6 +409,7 @@ pub fn run() {
             media_control,
             cancel_task,
             runs_snapshot,
+            cli_status,
             get_settings,
             update_settings,
             git_status,

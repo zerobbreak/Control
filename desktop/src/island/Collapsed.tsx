@@ -5,7 +5,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { Face, RoleGlyph, type FaceState } from "../Face";
 import { MediaControls, NowPlayingLine } from "../Assistant";
 import { recycleSuggestions } from "../capabilities";
-import { firstLink, resultHeadline, type AgentCard } from "../runs";
+import { elapsed, firstLink, resultHeadline, type AgentCard } from "../runs";
 import type { AgentEvent, MediaAction, NowPlaying, PendingApproval } from "../types";
 import { currentAction, requestWords, resultSummary, type Moment } from "./island";
 
@@ -28,6 +28,7 @@ type Props = {
   approval: PendingApproval | null;
   media: NowPlaying | null;
   notionParent: string | null;
+  now: number;
   onOpen: () => void;
   onReview: () => void;
   onControl: (action: MediaAction) => void;
@@ -61,7 +62,7 @@ function words(moment: Moment, card: AgentCard | null, feed: AgentEvent[], appro
 }
 
 /** The island at rest or at a glance; clicking its face opens the small card for the moment. */
-export function Collapsed({ moment, card, crew, feed, approval, media, notionParent, onOpen, onReview, onControl }: Props) {
+export function Collapsed({ moment, card, crew, feed, approval, media, notionParent, now, onOpen, onReview, onControl }: Props) {
   const [busy, setBusy] = useState(false);
   const { main, muted } = words(moment, card, feed, approval, notionParent);
 
@@ -83,6 +84,9 @@ export function Collapsed({ moment, card, crew, feed, approval, media, notionPar
         {moment === "media" && media && <NowPlayingLine media={media} />}
         {main && <span className="island-text">{main}</span>}
         {muted && <span className="island-muted">{muted}</span>}
+        {card?.active && (moment === "working" || moment === "thinking") && (
+          <span className="island-time mono">{elapsed(card.since, now)}</span>
+        )}
         {crew.length > 0 && (
           <span className="crew" aria-hidden="true">
             {crew.map((c) => (

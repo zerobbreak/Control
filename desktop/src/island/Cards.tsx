@@ -10,7 +10,10 @@ import { progressSteps, STATE_LABEL } from "../avatar/pillState";
 import { recycleSuggestions } from "../capabilities";
 import { contextCounts } from "../context";
 import {
+  agentActivity,
   agentName,
+  ago,
+  cardSessionId,
   elapsed,
   firstLine,
   firstLink,
@@ -20,7 +23,7 @@ import {
   type AgentCard,
 } from "../runs";
 import type { AgentEvent, ContextItem, PendingApproval, RunSummary } from "../types";
-import { connectingNote, currentAction, failReason, rememberRule, requestWords, resultSummary, ruleCounts, took, type Remember } from "./island";
+import { answerText, connectingNote, currentAction, failReason, rememberRule, requestWords, resultSummary, ruleCounts, took, type Remember } from "./island";
 
 const STATE_COLOR = { idle: "var(--faint)", thinking: "var(--text-2)", working: "var(--working)", needs: "var(--needs)", done: "var(--done)" };
 
@@ -47,24 +50,31 @@ type WorkProps = {
   feed: AgentEvent[];
   now: number;
   onDesk: (view: string) => void;
+  onBack: () => void;
   onNew: () => void;
 };
 
 /** The lead agent at work: what it is on, how far along its turn is, and the others beside it. */
-export function WorkCard({ card, others, feed, now, onDesk, onNew }: WorkProps) {
+export function WorkCard({ card, others, feed, now, onDesk, onBack, onNew }: WorkProps) {
   const run = card.run;
   const action = currentAction(card, feed);
   const note = run?.status === "starting" ? connectingNote(run.connections) : null;
   const title = run?.goal ?? card.session?.title ?? card.session?.lastPrompt ?? card.name;
+  const steps = agentActivity(feed, cardSessionId(card), 4);
+  const failedSteps = steps.filter((s) => s.failed).length;
   return (
     <section className={`card ${card.state}`} aria-label={`${card.name} ${STATE_LABEL[card.state].toLowerCase()}`}>
       <header className="card-head">
         <Face state={card.state} role={card.role} />
         <span className="card-tag working one-line">
-          {STATE_LABEL[card.state]}
+          <span className={`live-dot ${card.state}`} />
+          {card.name} · {STATE_LABEL[card.state]}
           {card.place ? ` · ${card.place}` : ""}
         </span>
         <span className="card-meta mono">{elapsed(card.since, now)}</span>
+        <button className="icon-btn" aria-label="All agents" title="All agents" onClick={onBack}>
+          <Icon name="back" size={13} />
+        </button>
         <button className="icon-btn" aria-label="New goal" title="New goal" onClick={onNew}>
           <Icon name="plus" size={13} />
         </button>
@@ -83,6 +93,30 @@ export function WorkCard({ card, others, feed, now, onDesk, onNew }: WorkProps) 
           <span key={step.label} className={step.status} />
         ))}
       </div>
+      {steps.length > 0 && (
+        <ol className="activity" aria-label="Recent activity" aria-live="polite">
+          {steps.map((step, i) => {
+            const current = i === steps.length - 1 && card.state === "working";
+            return (
+              <li key={`${step.at}-${i}`} className={step.failed ? "failed" : current ? "current" : "done"}>
+                <span className="activity-mark" aria-hidden="true">
+                  {step.failed ? "×" : current ? "" : "✓"}
+                </span>
+                <span className="activity-text one-line" title={`${step.tool} ${step.summary}`}>
+                  <span className="activity-tool">{step.tool}</span> <span className="mono">{step.summary}</span>
+                </span>
+                <span className="activity-ago mono">{ago(step.at, now)}</span>
+              </li>
+            );
+          })}
+        </ol>
+      )}
+      {steps.length > 0 && (
+        <span className="card-note mono">
+          {steps.length} recent {steps.length === 1 ? "step" : "steps"}
+          {failedSteps > 0 ? ` · ${failedSteps} failed` : ""}
+        </span>
+      )}
       <OthersList others={others} feed={feed} />
       <div className="card-actions">
         {run && card.active && (
@@ -195,6 +229,7 @@ type ResultProps = {
 export function ResultCard({ card, notionParent, suggested, onDismiss, onReview, onRecycle }: ResultProps) {
   const run = card.run;
   const failed = run?.status === "failed";
+  const [copied, setCopied] = useState(false);
 
   if (failed && run) {
     return (
@@ -234,6 +269,19 @@ export function ResultCard({ card, notionParent, suggested, onDismiss, onReview,
   const detail = made?.note ?? summary.summary;
   const counts = run ? ruleCounts(run) : [];
   const when = run?.endedAt ? `Done · ${took(run.startedAt, run.endedAt)}` : "Done";
+  // The whole answer, shown on the card itself so a question never needs the Desk to be read.
+  const full = answerText(text);
+  const showAnswer = !made && full.length > 0 && (run?.decision.task === "question" || full.includes("\n") || full.length > 140);
+
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(full);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // Clipboard unavailable; the text is still selectable.
+    }
+  }
 
   return (
     <section className="card done" aria-label={`${card.name} is done`}>
@@ -246,8 +294,15 @@ export function ResultCard({ card, notionParent, suggested, onDismiss, onReview,
         <strong className="card-title one-line" title={firstLine(answer) ?? title}>
           {title}
         </strong>
-        {detail && <span className="card-detail two-line">{detail}</span>}
+        {detail && !showAnswer && <span className="card-detail two-line">{detail}</span>}
       </div>
+      {showAnswer && (
+        <div className="answer" tabIndex={0} aria-label="Answer">
+          {full.split(/\n{2,}/).map((para, i) => (
+            <p key={i}>{para}</p>
+          ))}
+        </div>
+      )}
       {counts.length > 0 && (
         <div className="card-counts">
           {counts.map((c) => (
@@ -259,6 +314,11 @@ export function ResultCard({ card, notionParent, suggested, onDismiss, onReview,
         <button className="btn" onClick={onDismiss}>
           Dismiss
         </button>
+        {showAnswer && (
+          <button className="btn" onClick={copy}>
+            {copied ? "Copied" : "Copy"}
+          </button>
+        )}
         <button className={`btn ${link || suggested.length > 0 ? "" : "primary"}`} onClick={onReview}>
           Review
         </button>

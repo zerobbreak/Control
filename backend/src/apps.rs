@@ -38,6 +38,38 @@ pub struct App {
     pub status: AppStatus,
 }
 
+/// A claude.ai connector a goal can name, and the words that name it.
+pub struct Connector {
+    pub name: &'static str,
+    /// The server id used in tool names, e.g. "claude_ai_Gmail".
+    pub id: &'static str,
+    words: &'static [&'static str],
+}
+
+pub const CONNECTORS: &[Connector] = &[
+    Connector { name: "Notion", id: "claude_ai_Notion", words: &["notion"] },
+    Connector { name: "Gmail", id: "claude_ai_Gmail", words: &["gmail", "email", "e-mail", "inbox"] },
+    Connector { name: "Google Drive", id: "claude_ai_Google_Drive", words: &["google drive", "gdrive", "google docs", "google sheets"] },
+    Connector { name: "Google Calendar", id: "claude_ai_Google_Calendar", words: &["google calendar", "calendar"] },
+    Connector { name: "Microsoft 365", id: "claude_ai_Microsoft_365", words: &["microsoft 365", "outlook", "onedrive", "sharepoint"] },
+];
+
+/// The connectors a goal names. When it names some, only those need to load and connect; a goal
+/// that names none could use any app, so it gets them all.
+pub fn target_apps(goal: &str) -> Vec<&'static Connector> {
+    let goal = goal.to_lowercase();
+    CONNECTORS.iter().filter(|c| c.words.iter().any(|w| mentions(&goal, w))).collect()
+}
+
+/// Whether `word` appears in `text` as a word of its own (a trailing plural "s" is fine).
+fn mentions(text: &str, word: &str) -> bool {
+    text.match_indices(word).any(|(at, _)| {
+        let before = text[..at].chars().next_back();
+        let after = text[at + word.len()..].trim_start_matches('s').chars().next();
+        !before.is_some_and(|c| c.is_alphanumeric()) && !after.is_some_and(|c| c.is_alphanumeric())
+    })
+}
+
 /// Asks Claude Code which MCP servers it has and whether each is connected. This checks every
 /// server's health, so it takes a few seconds.
 pub fn list_apps() -> std::io::Result<Vec<App>> {
@@ -94,6 +126,15 @@ pub fn app_of_tool(tool: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_goal_names_the_services_it_needs() {
+        let names = |goal: &str| target_apps(goal).iter().map(|c| c.name).collect::<Vec<_>>();
+        assert_eq!(names("Make a Notion page about my week"), ["Notion"]);
+        assert_eq!(names("Summarise my emails into notion"), ["Notion", "Gmail"]);
+        assert!(names("Tidy up my downloads").is_empty());
+        assert!(names("Fix the denotionation bug").is_empty(), "only whole words count");
+    }
 
     #[test]
     fn reads_each_server_and_its_health() {
