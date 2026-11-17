@@ -3,7 +3,7 @@
 //! Polling instead of filesystem notifications keeps this reliable on Windows and on
 //! synced folders such as OneDrive, and costs little at a one-second interval.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -46,11 +46,29 @@ struct TailedFile {
 pub struct TranscriptWatcher {
     config: WatcherConfig,
     files: HashMap<PathBuf, TailedFile>,
+    /// When set, only these Claude Code sessions are read; every other transcript is left alone.
+    only_sessions: Option<HashSet<String>>,
 }
 
 impl TranscriptWatcher {
     pub fn new(config: WatcherConfig) -> Self {
-        Self { config, files: HashMap::new() }
+        Self { config, files: HashMap::new(), only_sessions: None }
+    }
+
+    /// Limits reading to the given session IDs, or lifts the limit with `None`. Transcripts
+    /// outside the limit are dropped, so none of their contents are read from then on.
+    pub fn restrict_to(&mut self, sessions: Option<HashSet<String>>) {
+        if let Some(allowed) = &sessions {
+            self.files.retain(|path, _| session_of(path).is_some_and(|id| allowed.contains(&id)));
+        }
+        self.only_sessions = sessions;
+    }
+
+    fn wanted(&self, path: &Path) -> bool {
+        match &self.only_sessions {
+            None => true,
+            Some(allowed) => session_of(path).is_some_and(|id| allowed.contains(&id)),
+        }
     }
 
     /// Discovers new transcripts and returns every event written since the last poll.
@@ -78,10 +96,15 @@ impl TranscriptWatcher {
         // ~/.claude/projects/<project>/<session>.jsonl
         for project in subdirs(&self.config.claude_projects_dir) {
             for path in jsonl_files(&project) {
-                if !self.files.contains_key(&path) && recent(&path) {
+                if !self.files.contains_key(&path) && recent(&path) && self.wanted(&path) {
                     self.files.insert(path, TailedFile::new(Parser::Claude));
                 }
             }
+        }
+
+        // Mission Control does not start Gemini yet, so a restricted watcher reads none of it.
+        if self.only_sessions.is_some() {
+            return;
         }
 
         // ~/.gemini/tmp/<project>/chats/session-*.jsonl, with the real path in <project>/.project_root
@@ -152,6 +175,11 @@ fn read_new_lines(
     Ok(())
 }
 
+/// Claude Code names each transcript after its session ID.
+fn session_of(path: &Path) -> Option<String> {
+    path.file_stem().map(|stem| stem.to_string_lossy().into_owned())
+}
+
 fn subdirs(dir: &Path) -> impl Iterator<Item = PathBuf> {
     fs::read_dir(dir)
         .into_iter()
@@ -168,4 +196,37 @@ fn jsonl_files(dir: &Path) -> impl Iterator<Item = PathBuf> {
         .flatten()
         .map(|entry| entry.path())
         .filter(|path| path.extension().is_some_and(|ext| ext == "jsonl"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn prompt(session: &str) -> String {
+        format!(r#"{{"type":"user","sessionId":"{session}","message":{{"content":"hello"}}}}"#) + "\n"
+    }
+
+    #[test]
+    fn a_restricted_watcher_reads_only_the_sessions_it_is_given() {
+        let root = std::env::temp_dir().join(format!("mc-watch-{}", uuid::Uuid::new_v4()));
+        let project = root.join("claude").join("some-project");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(project.join("mine.jsonl"), prompt("mine")).unwrap();
+        fs::write(project.join("theirs.jsonl"), prompt("theirs")).unwrap();
+        let config = WatcherConfig {
+            claude_projects_dir: root.join("claude"),
+            gemini_tmp_dir: root.join("gemini"),
+            lookback: Duration::from_secs(3600),
+        };
+
+        let mut watcher = TranscriptWatcher::new(config);
+        watcher.restrict_to(Some(HashSet::from(["mine".to_string()])));
+        let sessions: Vec<_> = watcher.poll().into_iter().map(|e| e.session_id).collect();
+        assert_eq!(sessions, ["mine"]);
+
+        watcher.restrict_to(None);
+        let sessions: Vec<_> = watcher.poll().into_iter().map(|e| e.session_id).collect();
+        assert_eq!(sessions, ["theirs"], "lifting the limit picks up the other transcript");
+        let _ = fs::remove_dir_all(root);
+    }
 }

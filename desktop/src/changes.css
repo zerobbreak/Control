@@ -1,0 +1,707 @@
+/* Changes: review and ship what agents changed in a project. Self-contained; uses theme.css tokens. */
+
+.ch {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: calc(1120px + 2 * clamp(20px, 4vw, 56px));
+  margin: 0 auto;
+  padding: 32px clamp(20px, 4vw, 56px) 56px;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  color: var(--text);
+  font-family: var(--font);
+}
+
+.ch *,
+.ch *::before,
+.ch *::after {
+  box-sizing: border-box;
+}
+
+.ch button,
+.ch input,
+.ch select,
+.ch textarea {
+  font: inherit;
+  color: inherit;
+}
+
+.ch :focus-visible {
+  outline: 2px solid var(--working);
+  outline-offset: 2px;
+}
+
+/* Header */
+
+.ch-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 16px;
+}
+
+.ch-title {
+  flex: 1 1 360px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ch-title h1 {
+  margin: 0;
+  font-size: 28px;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+}
+
+.ch-project {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  align-self: flex-start;
+  max-width: 100%;
+}
+
+.ch-project select {
+  appearance: none;
+  field-sizing: content;
+  max-width: 100%;
+  min-width: 0;
+  margin: 0 0 0 -8px;
+  padding: 0 34px 0 8px;
+  border: 0;
+  border-radius: var(--radius-m);
+  background: transparent;
+  font-size: 28px;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  cursor: pointer;
+  text-overflow: ellipsis;
+}
+
+.ch-project select:hover {
+  background: var(--surface-2);
+}
+
+.ch-project option {
+  font-size: 14px;
+  font-weight: 400;
+  background: var(--surface);
+  color: var(--text);
+}
+
+.ch-project .ch-chevron {
+  position: absolute;
+  right: 12px;
+  pointer-events: none;
+  color: var(--muted);
+}
+
+.ch-meta {
+  margin: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  color: var(--muted);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.ch-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+/* Buttons */
+
+.ch-btn {
+  height: 40px;
+  padding: 0 14px;
+  border-radius: 12px;
+  border: 1px solid var(--line-strong);
+  background: transparent;
+  color: var(--text);
+  font-size: 14px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.ch-btn:hover:not(:disabled) {
+  background: var(--surface-2);
+}
+
+.ch-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.ch-btn.strong {
+  border-color: transparent;
+  background: var(--surface-3);
+  font-weight: 500;
+  padding: 0 16px;
+}
+
+.ch-btn.strong:hover:not(:disabled) {
+  background: var(--line-strong);
+}
+
+.ch-btn.primary {
+  border: 0;
+  background: var(--text);
+  color: var(--bg);
+  font-weight: 600;
+}
+
+.ch-btn.primary:hover:not(:disabled) {
+  background: var(--text-2);
+}
+
+.ch-btn.small {
+  height: 32px;
+  padding: 0 10px;
+  border-radius: var(--radius-s);
+  font-size: 13px;
+}
+
+.ch-btn.grow {
+  flex: 1;
+}
+
+.ch-link {
+  height: 28px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--radius-s);
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.ch-link:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--surface-2);
+}
+
+.ch-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  flex: none;
+  border: 0;
+  border-radius: var(--radius-s);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.ch-icon-btn:hover {
+  color: var(--text);
+  background: var(--surface-3);
+}
+
+/* Branch switcher */
+
+.ch-branch {
+  position: relative;
+}
+
+.ch-branch-btn {
+  height: 30px;
+  max-width: 320px;
+  padding: 0 10px;
+  border-radius: 9px;
+  border: 1px solid var(--line-strong);
+  background: var(--surface);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+
+.ch-branch-btn:hover {
+  background: var(--surface-2);
+}
+
+.ch-branch-btn > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ch-branch-btn svg {
+  flex: none;
+  color: var(--muted);
+}
+
+.ch-branch-pop {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 6px);
+  left: 0;
+  width: 300px;
+  max-width: calc(100vw - 48px);
+  padding: 12px;
+  border-radius: var(--radius-l);
+  border: 1px solid var(--line-strong);
+  background: var(--surface);
+  box-shadow: 0 16px 40px rgb(0 0 0 / 0.45);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ch-branch-pop ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 240px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.ch-branch-pop li button {
+  width: 100%;
+  min-height: 34px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: var(--radius-s);
+  background: transparent;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  text-align: left;
+  font-size: 13px;
+  color: var(--text-2);
+  cursor: pointer;
+}
+
+.ch-branch-pop li button span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ch-branch-pop li button:hover:not(:disabled),
+.ch-branch-pop li button[aria-current="true"] {
+  background: var(--surface-3);
+  color: var(--text);
+}
+
+.ch-branch-pop li button:disabled {
+  cursor: default;
+}
+
+.ch-new-branch {
+  display: flex;
+  gap: 6px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+
+.ch-new-branch input {
+  flex: 1;
+  min-width: 0;
+  height: 32px;
+  padding: 0 10px;
+  border-radius: var(--radius-s);
+  border: 1px solid var(--line-strong);
+  background: var(--bg);
+  font-size: 13px;
+}
+
+/* Notice */
+
+.ch-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 10px 10px 14px;
+  border-radius: var(--radius-m);
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.ch-notice > span {
+  flex: 1;
+  padding-top: 3px;
+  white-space: pre-wrap;
+}
+
+.ch-notice.ok {
+  background: var(--done-bg);
+  color: var(--done-ink);
+}
+
+.ch-notice.error {
+  background: var(--failed-bg);
+  color: var(--failed-ink);
+}
+
+/* Layout */
+
+.ch-body {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 20px;
+  align-items: flex-start;
+}
+
+.ch-side {
+  flex: 1 1 300px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.ch-card {
+  border-radius: var(--radius-l);
+  background: var(--surface);
+  border: 1px solid var(--line);
+}
+
+.ch-empty {
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+  font-size: 14px;
+  color: var(--text-2);
+}
+
+.ch-empty p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.ch-faint {
+  font-size: 13px;
+  color: var(--faint);
+}
+
+.ch-muted,
+.ch-text {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.ch-text {
+  color: var(--text-2);
+}
+
+/* File list */
+
+.ch-files {
+  overflow: hidden;
+}
+
+.ch-files-empty {
+  margin: 0;
+  padding: 16px 14px;
+  font-size: 14px;
+  color: var(--muted);
+}
+
+.ch-group + .ch-group .ch-group-head {
+  border-top: 1px solid var(--line);
+}
+
+.ch-group-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  min-height: 48px;
+  padding: 8px 10px 8px 14px;
+  border-bottom: 1px solid var(--line);
+}
+
+.ch-group ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.ch-group li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-left: 14px;
+}
+
+.ch-group li:hover {
+  background: var(--surface-2);
+}
+
+.ch-group li.on {
+  background: var(--surface-3);
+}
+
+.ch-group input[type="checkbox"] {
+  margin: 0;
+  flex: none;
+  accent-color: var(--text);
+  cursor: pointer;
+}
+
+.ch-file {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px 10px 0;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.ch-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ch-kind {
+  flex: none;
+  width: 12px;
+  font-family: var(--mono);
+  font-weight: 500;
+  color: var(--muted);
+}
+
+.ch-kind.modified { color: var(--needs); }
+.ch-kind.added,
+.ch-kind.untracked { color: var(--done); }
+.ch-kind.deleted,
+.ch-kind.conflicted { color: var(--failed); }
+.ch-kind.renamed,
+.ch-kind.copied,
+.ch-kind.typeChanged { color: var(--working); }
+
+/* Commit and pull request */
+
+.ch-commit,
+.ch-prcard {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+}
+
+.ch-commit textarea,
+.ch-pr-form input,
+.ch-pr-form textarea {
+  width: 100%;
+  background: var(--bg);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-m);
+  padding: 10px 12px;
+  font-size: 14px;
+  line-height: 1.5;
+  resize: vertical;
+}
+
+.ch-commit .ch-btn.primary {
+  height: 42px;
+}
+
+.ch-pr-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ch-pr-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.ch-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.ch-check input {
+  margin: 0;
+  accent-color: var(--text);
+}
+
+.ch-pr {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.ch-pr-line {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  font-size: 14px;
+}
+
+.ch-pr-title {
+  color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+
+.ch-pr-state {
+  flex: none;
+  padding: 2px 8px;
+  border-radius: var(--radius-s);
+  font-size: 12px;
+  font-weight: 500;
+  background: var(--surface-3);
+  color: var(--text-2);
+}
+
+.ch-pr-state.open { background: var(--done-bg); color: var(--done-ink); }
+.ch-pr-state.merged { background: var(--working-bg); color: var(--working-ink); }
+.ch-pr-state.closed { background: var(--failed-bg); color: var(--failed-ink); }
+
+/* Diff */
+
+.ch-diff {
+  flex: 999 1 520px;
+  min-width: 0;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--surface) 70%, var(--bg));
+  display: flex;
+  flex-direction: column;
+}
+
+.ch-diff-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 48px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--line);
+  font-size: 13px;
+}
+
+.ch-tag {
+  flex: none;
+  padding: 2px 8px;
+  border-radius: var(--radius-s);
+  background: var(--surface-3);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.ch-added { color: var(--done); flex: none; }
+.ch-removed { color: var(--failed); flex: none; }
+
+.ch-diff-empty {
+  padding: 48px 20px;
+  text-align: center;
+  font-size: 14px;
+  color: var(--muted);
+}
+
+/* Wide diffs scroll in their own box; rows stretch to the widest line so tints stay whole. */
+.ch-diff-body {
+  max-height: min(70vh, 720px);
+  overflow: auto;
+  padding: 10px 0;
+  font-size: 13px;
+}
+
+.ch-diff-lines {
+  display: inline-block;
+  min-width: 100%;
+}
+
+.ch-ln {
+  display: flex;
+  gap: 10px;
+  padding: 0 14px;
+  line-height: 22px;
+  white-space: pre;
+  color: var(--muted);
+}
+
+.ch-no {
+  flex: none;
+  width: 36px;
+  text-align: right;
+  color: color-mix(in srgb, var(--faint) 70%, var(--bg));
+  user-select: none;
+}
+
+.ch-sign {
+  flex: none;
+  width: 10px;
+  user-select: none;
+}
+
+.ch-ln.add {
+  background: color-mix(in srgb, var(--done) 10%, transparent);
+  color: var(--done-ink);
+}
+
+.ch-ln.add .ch-no { color: color-mix(in srgb, var(--done) 55%, var(--bg)); }
+
+.ch-ln.del {
+  background: color-mix(in srgb, var(--failed) 10%, transparent);
+  color: var(--failed-ink);
+}
+
+.ch-ln.del .ch-no { color: color-mix(in srgb, var(--failed) 55%, var(--bg)); }
+
+.ch-ln.hunk {
+  color: var(--faint);
+  margin-top: 4px;
+}
+
+.ch-ln.hunk:first-child { margin-top: 0; }
+
+.ch-ln.note {
+  color: var(--faint);
+  font-style: italic;
+  white-space: pre-wrap;
+}
+
+.ch-rules {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  border-top: 1px solid var(--line);
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+
+.ch-rules svg {
+  flex: none;
+  color: var(--faint);
+}

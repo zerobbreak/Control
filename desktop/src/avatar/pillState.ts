@@ -21,7 +21,12 @@ export function sessionState(s: SessionSummary): AvatarState {
 
 /** Mission Control's own mood: the most urgent state among its agents. */
 export function leadState(sessions: SessionSummary[]): AvatarState {
-  return sessions.map(sessionState).reduce<AvatarState>((a, b) => (URGENCY.indexOf(b) > URGENCY.indexOf(a) ? b : a), "idle");
+  return mostUrgent(sessions.map(sessionState));
+}
+
+/** The most urgent of several states, or idle when there are none. */
+export function mostUrgent(states: AvatarState[]): AvatarState {
+  return states.reduce<AvatarState>((a, b) => (URGENCY.indexOf(b) > URGENCY.indexOf(a) ? b : a), "idle");
 }
 
 /** Which avatar an agent gets. Claude Code and Gemini CLI both work in a repo, so both are coding agents. */
@@ -45,4 +50,20 @@ export function pillCrew(sessions: SessionSummary[], max = 3): SessionSummary[] 
     .sort((a, b) => URGENCY.indexOf(sessionState(b.s)) - URGENCY.indexOf(sessionState(a.s)) || a.i - b.i)
     .slice(0, max)
     .map(({ s }) => s);
+}
+
+export type StepStatus = "done" | "current" | "blocked" | "upcoming";
+export type ProgressStep = { label: string; status: StepStatus };
+
+/**
+ * Where a session is in its turn: Thinking → Working → Done.
+ * A stalled turn is stuck on the Working step until you step in, so that step reads "Needs you".
+ */
+export function progressSteps(state: AvatarState): ProgressStep[] {
+  const reached = { idle: -1, thinking: 0, working: 1, needs: 1, done: 3 }[state];
+  return ["Thinking", "Working", "Done"].map((label, i) => {
+    if (i < reached) return { label, status: "done" };
+    if (i > reached) return { label, status: "upcoming" };
+    return state === "needs" ? { label: "Needs you", status: "blocked" } : { label, status: "current" };
+  });
 }

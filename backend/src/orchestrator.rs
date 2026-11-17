@@ -1,0 +1,1149 @@
+//! Turns a goal into a running agent: routes it, picks an agent that can do it, starts the
+//! process, answers or forwards its permission requests and keeps track of it until it exits.
+//! The Boundaries settings bound every step.
+//!
+//! Progress inside a run is not read here. Each run uses a session ID chosen up front, so the
+//! transcript watcher reports its events under that same ID on the board.
+
+use std::fs::{self, File};
+use std::io::{BufRead, BufReader, Write};
+use std::path::{Path, PathBuf};
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::Arc;
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::time::{Duration, Instant};
+
+use chrono::{DateTime, Utc};
+use serde::Serialize;
+
+use crate::agent::{connections_settled, Agent, AppConnection, Answer, ApprovalRequest, HostMessage, Launch};
+use crate::apps::{self, AppAccess};
+use crate::events::AgentKind;
+use crate::router::{self, Access, Decision, TaskKind, Tier};
+use crate::git::{self, GitAction, GitRepo};
+use crate::settings::{Capability, CodingAgent, GitRule, Settings};
+
+pub struct RuntimeConfig {
+    /// One log file per run, holding everything the agent wrote.
+    pub runs_dir: PathBuf,
+    /// Where goals that are not about any folder run.
+    pub scratch_dir: PathBuf,
+    /// The Boundaries settings.
+    pub settings_path: PathBuf,
+}
+
+impl RuntimeConfig {
+    pub fn from_home() -> Option<Self> {
+        let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))?;
+        let root = PathBuf::from(home).join(".mission-control");
+        Some(Self {
+            runs_dir: root.join("runs"),
+            scratch_dir: root.join("scratch"),
+            settings_path: root.join("settings.json"),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RunStatus {
+    /// Waiting for the agent's app connections before handing it the goal.
+    Starting,
+    Running,
+    /// Paused until someone answers one of its permission requests.
+    NeedsApproval,
+    Finished,
+    Failed,
+    Cancelled,
+}
+
+/// One goal handed to one agent, as the UI sees it.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunSummary {
+    /// Also the agent's session ID, so it matches a session on the board.
+    pub id: String,
+    pub goal: String,
+    pub workdir: String,
+    pub agent: AgentKind,
+    pub model: String,
+    pub decision: Decision,
+    pub status: RunStatus,
+    pub exit_code: Option<i32>,
+    pub started_at: DateTime<Utc>,
+    pub ended_at: Option<DateTime<Utc>>,
+    pub log_path: String,
+    /// The files and folders the user handed over with the goal.
+    pub attachments: Vec<String>,
+    /// How the agent's app connections went while it started; empty for agents without apps.
+    pub connections: Vec<AppConnection>,
+    /// The agent's final answer, in full, once it has finished the goal.
+    pub result: Option<String>,
+    /// Requests the Boundaries rules answered without asking.
+    pub auto_allowed: u32,
+    pub auto_denied: u32,
+}
+
+/// A permission request waiting for an answer.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingApproval {
+    pub run_id: String,
+    pub agent: AgentKind,
+    /// The run's folder, so the prompt can say where the action would happen.
+    pub workdir: String,
+    #[serde(flatten)]
+    pub request: ApprovalRequest,
+    pub asked_at: DateTime<Utc>,
+}
+
+#[derive(Debug)]
+pub enum StartError {
+    EmptyGoal,
+    MissingFolder(PathBuf),
+    /// An attached file or folder does not exist.
+    MissingAttachment(PathBuf),
+    /// Boundaries do not allow runs in this folder.
+    FolderNotAllowed(PathBuf),
+    /// No registered agent can do this kind of task yet.
+    NoAgent(Decision),
+    /// The task needs a capability the user has not been asked about yet.
+    NeedsPermission(Capability),
+    /// The task needs a capability the user said no to.
+    NotAllowed(Capability),
+    /// Code work needs a project folder to work in; without one it would write into the scratch folder.
+    NeedsProject,
+    Spawn(std::io::Error),
+}
+
+impl std::fmt::Display for StartError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::EmptyGoal => write!(f, "the goal is empty"),
+            Self::MissingFolder(path) => write!(f, "{} is not a folder", path.display()),
+            Self::MissingAttachment(path) => write!(f, "{} does not exist", path.display()),
+            Self::FolderNotAllowed(path) => {
+                write!(f, "Boundaries do not allow runs in {}", path.display())
+            }
+            Self::NoAgent(d) => write!(f, "no enabled agent can handle {:?} tasks", d.task),
+            Self::NeedsPermission(c) => write!(f, "{} needs your permission first", capability_name(*c)),
+            Self::NotAllowed(c) => write!(f, "{} is turned off in Boundaries", capability_name(*c)),
+            Self::NeedsProject => write!(f, "code work needs a project: add its folder, then plan again"),
+            Self::Spawn(err) => write!(f, "could not start the agent: {err}"),
+        }
+    }
+}
+
+impl std::error::Error for StartError {}
+
+/// What a read-only run is told when it asks for anything beyond reading.
+const READ_ONLY_REFUSAL: &str =
+    "This run is read-only: Mission Control started it to answer a question, not to change anything.";
+const APP_READ_ONLY_REFUSAL: &str =
+    "The user lets agents only read this app; Mission Control's Apps & access keeps it to looking. Say what you would have changed instead.";
+const LOCKDOWN_REASON: &str = " Read-only, because read-only mode is on in Boundaries.";
+/// How long a run waits for its app connections before starting without the slow ones.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
+
+struct Run {
+    summary: RunSummary,
+    agent: Arc<dyn Agent>,
+    child: Option<Child>,
+    /// Open until the agent finishes its goal; closing it lets the agent exit.
+    stdin: Option<ChildStdin>,
+    /// The goal, held back until the agent's app connections are ready.
+    waiting_goal: Option<String>,
+    started: Instant,
+    /// A readiness probe is out and has not been answered yet.
+    probing: bool,
+    /// Server ids of the connectors the goal named; empty when it could use any.
+    target_apps: Vec<&'static str>,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum RecycleError {
+    NeedsPermission,
+    NotAllowed,
+    UnknownRun,
+    Empty,
+    /// Not a file inside a folder handed to the run.
+    Outside(PathBuf),
+    Failed(String),
+}
+
+impl std::fmt::Display for RecycleError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NeedsPermission => write!(f, "recycling files needs your permission first"),
+            Self::NotAllowed => write!(f, "recycling files is turned off in Boundaries"),
+            Self::UnknownRun => write!(f, "that run is no longer known"),
+            Self::Empty => write!(f, "no files to recycle"),
+            Self::Outside(p) => write!(f, "{} is not a file in a folder you handed over", p.display()),
+            Self::Failed(e) => write!(f, "could not move the files to the Recycle Bin: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for RecycleError {}
+
+/// Every path must be an existing file inside one of `roots`, compared after resolving `..` and
+/// links so a suggestion cannot reach outside. Returns their total size.
+fn check_recyclable(roots: &[PathBuf], paths: &[PathBuf]) -> Result<u64, RecycleError> {
+    if paths.is_empty() {
+        return Err(RecycleError::Empty);
+    }
+    let roots: Vec<PathBuf> = roots.iter().filter_map(|r| r.canonicalize().ok()).collect();
+    let mut bytes = 0;
+    for path in paths {
+        let real = path.canonicalize().map_err(|_| RecycleError::Outside(path.clone()))?;
+        let meta = fs::metadata(&real).map_err(|_| RecycleError::Outside(path.clone()))?;
+        if !meta.is_file() || !roots.iter().any(|root| real.starts_with(root) && real != *root) {
+            return Err(RecycleError::Outside(path.clone()));
+        }
+        bytes += meta.len();
+    }
+    Ok(bytes)
+}
+
+/// What a goal would start, for the user to review before it does.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Preview {
+    pub decision: Decision,
+    pub workdir: String,
+    pub model: String,
+    /// Whether code runs would ask before each edit.
+    pub ask_before_edits: bool,
+    /// Whether every request would be allowed without asking.
+    pub full_autonomy: bool,
+    /// A capability the run needs the user's permission for, such as browser control.
+    pub capability: Option<Capability>,
+    /// The user's answer for it so far: allowed, not allowed, or not asked yet.
+    pub capability_granted: Option<bool>,
+}
+
+pub struct Orchestrator {
+    config: RuntimeConfig,
+    settings: Settings,
+    agents: Vec<Arc<dyn Agent>>,
+    runs: Vec<Run>,
+    pending: Vec<PendingApproval>,
+    /// Reader threads, one per run, forward what the agents say here.
+    inbox: Receiver<(String, HostMessage)>,
+    outbox: Sender<(String, HostMessage)>,
+}
+
+impl Orchestrator {
+    /// `agents` are tried in order; the first that handles a task gets it.
+    pub fn new(config: RuntimeConfig, agents: Vec<Arc<dyn Agent>>) -> Self {
+        let (outbox, inbox) = mpsc::channel();
+        let settings = Settings::load(&config.settings_path);
+        Self { config, settings, agents, runs: Vec::new(), pending: Vec::new(), inbox, outbox }
+    }
+
+    pub fn settings(&self) -> &Settings {
+        &self.settings
+    }
+
+    /// Applies new Boundaries settings to future runs and requests, and saves them.
+    pub fn update_settings(&mut self, settings: Settings) -> std::io::Result<Settings> {
+        let settings = settings.normalized();
+        settings.save(&self.config.settings_path)?;
+        self.settings = settings.clone();
+        Ok(settings)
+    }
+
+    /// Whether this session ID belongs to a run Mission Control started.
+    pub fn owns_session(&self, session_id: &str) -> bool {
+        self.runs.iter().any(|r| r.summary.id == session_id)
+    }
+
+    /// What starting `goal` would do, without starting anything: which agent, where, with what
+    /// access and why. Fails for the same reasons `start` would.
+    pub fn preview(&self, goal: &str, folder: Option<&Path>, attachments: &[PathBuf]) -> Result<Preview, StartError> {
+        self.preview_routed(goal, folder, attachments, keyword_route(goal, folder, attachments))
+    }
+
+    /// `preview` with a decision already made, such as one from the model router.
+    pub fn preview_routed(&self, goal: &str, folder: Option<&Path>, attachments: &[PathBuf], routed: Decision) -> Result<Preview, StartError> {
+        self.preview_with(goal, folder, attachments, routed, None)
+    }
+
+    /// `preview_routed` for a goal given to a particular coding CLI, such as one picked on the island.
+    pub fn preview_with(&self, goal: &str, folder: Option<&Path>, attachments: &[PathBuf], routed: Decision, prefer: Option<CodingAgent>) -> Result<Preview, StartError> {
+        let (workdir, decision, agent) = self.plan(goal, folder, attachments, routed, prefer)?;
+        let capability = needed_capability(Some(decision.task));
+        Ok(Preview {
+            model: agent.model(decision.tier).to_string(),
+            decision,
+            workdir: workdir.display().to_string(),
+            ask_before_edits: self.settings.ask_before_edits,
+            full_autonomy: self.settings.full_autonomy,
+            capability,
+            capability_granted: capability.and_then(|c| self.settings.capability(c)),
+        })
+    }
+
+    /// Checks a goal and its routing: the folder it will run in, the decision within the user's
+    /// limits, and the agent.
+    fn plan(
+        &self,
+        goal: &str,
+        folder: Option<&Path>,
+        attachments: &[PathBuf],
+        routed: Decision,
+        prefer: Option<CodingAgent>,
+    ) -> Result<(PathBuf, Decision, Arc<dyn Agent>), StartError> {
+        let goal = goal.trim();
+        if goal.is_empty() {
+            return Err(StartError::EmptyGoal);
+        }
+        if let Some(missing) = attachments.iter().find(|a| !a.exists()) {
+            return Err(StartError::MissingAttachment(missing.clone()));
+        }
+        let workdir = match folder {
+            Some(dir) if !dir.is_dir() => return Err(StartError::MissingFolder(dir.to_path_buf())),
+            Some(dir) if !self.settings.allows_folder(dir) => {
+                return Err(StartError::FolderNotAllowed(dir.to_path_buf()));
+            }
+            Some(dir) => dir.to_path_buf(),
+            None => self.config.scratch_dir.clone(),
+        };
+
+        let decision = bounded(routed, &self.settings);
+        if decision.task == TaskKind::Code && folder.is_none() {
+            return Err(StartError::NeedsProject);
+        }
+        if let Some(capability) = needed_capability(Some(decision.task)) {
+            if self.settings.capability(capability) == Some(false) {
+                return Err(StartError::NotAllowed(capability));
+            }
+        }
+        if !self.settings.allows_task(decision.task) {
+            return Err(StartError::NoAgent(decision));
+        }
+        let wants_gemini = matches!(decision.task, TaskKind::Code | TaskKind::Question) && prefer.unwrap_or(self.settings.coding_agent) == CodingAgent::Gemini;
+        let chosen = self
+            .agents
+            .iter()
+            .filter(|a| a.handles(decision.task))
+            .find(|a| !wants_gemini || a.kind() == AgentKind::Gemini)
+            .or_else(|| self.agents.iter().find(|a| a.handles(decision.task)))
+            .cloned();
+        let Some(agent) = chosen else {
+            return Err(StartError::NoAgent(decision));
+        };
+        Ok((workdir, decision, agent))
+    }
+
+    /// Routes `goal`, starts an agent on it in `folder` (or the scratch folder) with any
+    /// `attachments` the user handed over, and returns the run.
+    pub fn start(&mut self, goal: &str, folder: Option<&Path>, attachments: &[PathBuf]) -> Result<RunSummary, StartError> {
+        self.start_routed(goal, folder, attachments, keyword_route(goal, folder, attachments))
+    }
+
+    /// `start` with a decision already made, such as the one the user just reviewed.
+    pub fn start_routed(&mut self, goal: &str, folder: Option<&Path>, attachments: &[PathBuf], routed: Decision) -> Result<RunSummary, StartError> {
+        self.start_with(goal, folder, attachments, routed, None)
+    }
+
+    /// `start_routed` for a goal given to a particular coding CLI. Runs are independent, so
+    /// Claude and Gemini can each have goals going at the same time.
+    pub fn start_with(&mut self, goal: &str, folder: Option<&Path>, attachments: &[PathBuf], routed: Decision, prefer: Option<CodingAgent>) -> Result<RunSummary, StartError> {
+        let (workdir, decision, agent) = self.plan(goal, folder, attachments, routed, prefer)?;
+        // Asking is the pill's job; the runtime only checks the answer.
+        if let Some(capability) = needed_capability(Some(decision.task)) {
+            if self.settings.capability(capability) != Some(true) {
+                return Err(StartError::NeedsPermission(capability));
+            }
+        }
+        let goal = goal.trim();
+        if folder.is_none() {
+            fs::create_dir_all(&workdir).map_err(StartError::Spawn)?;
+        }
+
+        let id = uuid::Uuid::new_v4().to_string();
+        let target_apps: Vec<&'static str> = apps::target_apps(goal).iter().map(|c| c.id).collect();
+        let launch = Launch {
+            session_id: &id,
+            goal,
+            workdir: &workdir,
+            attachments,
+            tier: decision.tier,
+            access: decision.access,
+            ask_before_edits: self.settings.ask_before_edits,
+            max_budget_usd: self.settings.max_budget_usd,
+            notion_parent: self.settings.notion_parent.as_deref(),
+            read_apps_freely: self.settings.read_apps_freely,
+            target_apps: &target_apps,
+        };
+        fs::create_dir_all(&self.config.runs_dir).map_err(StartError::Spawn)?;
+        let log_path = self.config.runs_dir.join(format!("{id}.log"));
+        let log = File::create(&log_path).map_err(StartError::Spawn)?;
+
+        let mut child = spawn_hosted(agent.command(&launch), &log).map_err(StartError::Spawn)?;
+        let mut stdin = child.stdin.take().expect("stdin is piped");
+        let stdout = child.stdout.take().expect("stdout is piped");
+        // Agents that work in apps first say when their connections are ready; the goal waits.
+        let goal_line = agent.goal_message(goal, attachments);
+        let (first_line, waiting_goal, status) = match agent.readiness_probe() {
+            Some(probe) => (probe, Some(goal_line), RunStatus::Starting),
+            None => (goal_line, None, RunStatus::Running),
+        };
+        // An agent that runs alone was given its goal on the command line.
+        if !agent.single_shot() {
+            if let Err(err) = writeln!(stdin, "{first_line}") {
+                let _ = child.kill();
+                return Err(StartError::Spawn(err));
+            }
+        }
+        spawn_reader(id.clone(), agent.clone(), stdout, log, self.outbox.clone());
+
+        let summary = RunSummary {
+            id: id.clone(),
+            goal: goal.to_string(),
+            workdir: workdir.display().to_string(),
+            agent: agent.kind(),
+            model: agent.model(decision.tier).to_string(),
+            decision,
+            status,
+            exit_code: None,
+            started_at: Utc::now(),
+            ended_at: None,
+            log_path: log_path.display().to_string(),
+            attachments: attachments.iter().map(|a| a.display().to_string()).collect(),
+            connections: Vec::new(),
+            result: None,
+            auto_allowed: 0,
+            auto_denied: 0,
+        };
+        let probing = waiting_goal.is_some();
+        let single_shot = agent.single_shot();
+        self.runs.push(Run {
+            summary: summary.clone(),
+            agent,
+            child: Some(child),
+            // An agent that runs alone has had its goal; closing its input is what lets it begin.
+            stdin: if single_shot { None } else { Some(stdin) },
+            waiting_goal,
+            started: Instant::now(),
+            probing,
+            target_apps,
+        });
+        Ok(summary)
+    }
+
+    /// Answers a pending permission request. Returns false if it is no longer pending.
+    pub fn answer(&mut self, run_id: &str, request_id: &str, answer: Answer) -> bool {
+        let Some(index) = self.pending.iter().position(|p| p.run_id == run_id && p.request.request_id == request_id)
+        else {
+            return false;
+        };
+        let pending = self.pending.remove(index);
+        let Some(run) = self.runs.iter_mut().find(|r| r.summary.id == run_id) else {
+            return false;
+        };
+        send(run, &pending.request, &answer);
+        if !self.pending.iter().any(|p| p.run_id == run_id) && run.summary.status == RunStatus::NeedsApproval {
+            run.summary.status = RunStatus::Running;
+        }
+        true
+    }
+
+    /// Stops a run. Returns false if there is no such run or it already ended.
+    pub fn cancel(&mut self, id: &str) -> bool {
+        let Some(run) = self.runs.iter_mut().find(|r| r.summary.id == id) else {
+            return false;
+        };
+        let Some(mut child) = run.child.take() else {
+            return false;
+        };
+        run.stdin = None;
+        let _ = child.kill();
+        let _ = child.wait();
+        run.summary.status = RunStatus::Cancelled;
+        run.summary.ended_at = Some(Utc::now());
+        self.pending.retain(|p| p.run_id != id);
+        true
+    }
+
+    /// Handles what agents have said and notices runs that have exited. Call it regularly;
+    /// it never blocks.
+    pub fn poll(&mut self) {
+        while let Ok((run_id, message)) = self.inbox.try_recv() {
+            let Some(run) = self.runs.iter_mut().find(|r| r.summary.id == run_id) else { continue };
+            match message {
+                HostMessage::Finished(result) => {
+                    if result.is_some() {
+                        run.summary.result = result;
+                    }
+                    run.stdin = None;
+                }
+                HostMessage::Ready(apps) => {
+                    // Only the services the goal named matter; the rest were kept out of the run.
+                    let apps: Vec<_> = apps
+                        .into_iter()
+                        .filter(|a| run.target_apps.is_empty() || run.target_apps.contains(&apps::server_id(&format!("claude.ai {}", a.name)).as_str()))
+                        .collect();
+                    let settled = connections_settled(&apps);
+                    run.summary.connections = apps;
+                    if settled {
+                        release_goal(run);
+                    } else {
+                        run.probing = false;
+                    }
+                }
+                HostMessage::Approval(request) => {
+                    let workdir = Path::new(&run.summary.workdir);
+                    if let Some(answer) = auto_answer(&self.settings, run.summary.decision.access, &request, workdir) {
+                        match answer {
+                            Answer::Allow => run.summary.auto_allowed += 1,
+                            Answer::Deny(_) => run.summary.auto_denied += 1,
+                        }
+                        send(run, &request, &answer);
+                        continue;
+                    }
+                    run.summary.status = RunStatus::NeedsApproval;
+                    self.pending.push(PendingApproval {
+                        run_id,
+                        agent: run.summary.agent,
+                        workdir: run.summary.workdir.clone(),
+                        request,
+                        asked_at: Utc::now(),
+                    });
+                }
+            }
+        }
+
+        // Keep asking runs that are still connecting, and stop waiting on slow connections.
+        for run in self.runs.iter_mut().filter(|r| r.waiting_goal.is_some() && r.child.is_some()) {
+            if run.started.elapsed() > CONNECT_TIMEOUT {
+                release_goal(run);
+            } else if !run.probing {
+                if let Some(probe) = run.agent.readiness_probe() {
+                    write_line(run, &probe);
+                }
+                run.probing = true;
+            }
+        }
+
+        for run in &mut self.runs {
+            let Some(child) = &mut run.child else { continue };
+            let status = match child.try_wait() {
+                Ok(Some(status)) => status,
+                Ok(None) => continue,
+                Err(err) => {
+                    eprintln!("mission-control: lost track of run {}: {err}", run.summary.id);
+                    run.child = None;
+                    run.stdin = None;
+                    run.summary.status = RunStatus::Failed;
+                    run.summary.ended_at = Some(Utc::now());
+                    continue;
+                }
+            };
+            run.child = None;
+            run.stdin = None;
+            run.summary.exit_code = status.code();
+            run.summary.status = if status.success() { RunStatus::Finished } else { RunStatus::Failed };
+            run.summary.ended_at = Some(Utc::now());
+        }
+        let live: Vec<&str> = self.runs.iter().filter(|r| r.child.is_some()).map(|r| r.summary.id.as_str()).collect();
+        self.pending.retain(|p| live.contains(&p.run_id.as_str()));
+    }
+
+    /// Moves files an agent suggested removing to the Recycle Bin, where the user can restore
+    /// them. Only files inside a folder the user handed to that run are accepted, and only once
+    /// the user has allowed recycling. Returns how many bytes were moved.
+    pub fn recycle(&self, run_id: &str, paths: &[PathBuf]) -> Result<u64, RecycleError> {
+        match self.settings.capability(Capability::RecycleFiles) {
+            None => return Err(RecycleError::NeedsPermission),
+            Some(false) => return Err(RecycleError::NotAllowed),
+            Some(true) => {}
+        }
+        let run = self.runs.iter().find(|r| r.summary.id == run_id).ok_or(RecycleError::UnknownRun)?;
+        let roots: Vec<PathBuf> = run.summary.attachments.iter().map(PathBuf::from).filter(|p| p.is_dir()).collect();
+        let bytes = check_recyclable(&roots, paths)?;
+        trash::delete_all(paths).map_err(|e| RecycleError::Failed(e.to_string()))?;
+        Ok(bytes)
+    }
+
+    /// Every run this session, newest first.
+    pub fn runs(&self) -> Vec<RunSummary> {
+        self.runs.iter().rev().map(|r| r.summary.clone()).collect()
+    }
+
+    /// Permission requests waiting for an answer, oldest first.
+    pub fn approvals(&self) -> Vec<PendingApproval> {
+        self.pending.clone()
+    }
+}
+
+impl Drop for Orchestrator {
+    /// Agents started by Mission Control do not outlive it.
+    fn drop(&mut self) {
+        for run in &mut self.runs {
+            if let Some(child) = &mut run.child {
+                let _ = child.kill();
+            }
+        }
+    }
+}
+
+/// Applies the Boundaries limits to the router's decision.
+fn bounded(mut decision: Decision, settings: &Settings) -> Decision {
+    if decision.tier > settings.max_tier {
+        decision.tier = settings.max_tier;
+        let name = match settings.max_tier {
+            Tier::Fast => "fast",
+            Tier::Balanced => "balanced",
+            Tier::Strongest => "strongest",
+        };
+        decision.reason.push_str(&format!(" Capped at the {name} model in Boundaries."));
+        if decision.task == TaskKind::Assistant && decision.tier == Tier::Fast {
+            decision.reason.push_str(" The fast model can't hold your connected apps, so it works from the files only.");
+        }
+    }
+    if settings.read_only_mode && decision.access != Access::ReadOnly {
+        decision.access = Access::ReadOnly;
+        decision.reason.push_str(LOCKDOWN_REASON);
+    }
+    decision
+}
+
+/// The keyword router's decision, used when no other router has decided.
+pub fn keyword_route(goal: &str, folder: Option<&Path>, attachments: &[PathBuf]) -> Decision {
+    router::route(goal.trim(), route_context(folder, attachments))
+}
+
+/// What the router sees in what came with a goal.
+pub fn route_context(folder: Option<&Path>, attachments: &[PathBuf]) -> router::Context {
+    router::Context {
+        folder: folder.is_some(),
+        attachments: !attachments.is_empty(),
+        loose_folder: attachments.iter().any(|a| a.is_dir() && !crate::context::is_project(a)),
+    }
+}
+
+/// The capability a kind of task needs the user's permission for.
+fn needed_capability(task: Option<TaskKind>) -> Option<Capability> {
+    (task? == TaskKind::Browse).then_some(Capability::BrowserControl)
+}
+
+pub fn capability_name(capability: Capability) -> &'static str {
+    match capability {
+        Capability::BrowserControl => "Browser control",
+        Capability::RecycleFiles => "Recycling files",
+        Capability::MediaControls => "Media controls",
+    }
+}
+
+/// The answer the Boundaries rules give a request without asking, if any.
+///
+/// A run's read-only access is Mission Control's promise to the user, so it is enforced here
+/// rather than trusted to the agent's own permission mode, and it outranks everything else.
+/// Each app's access comes next, then git rules: "never" and protected branches outrank full
+/// autonomy.
+fn auto_answer(settings: &Settings, access: Access, request: &ApprovalRequest, workdir: &Path) -> Option<Answer> {
+    if access == Access::ReadOnly {
+        return Some(Answer::Deny(READ_ONLY_REFUSAL.into()));
+    }
+    // Reading tools never ask, so a request in an app is always a change.
+    if let Some(app) = apps::app_of_tool(&request.tool) {
+        match settings.app_access(app) {
+            AppAccess::Read => return Some(Answer::Deny(APP_READ_ONLY_REFUSAL.into())),
+            AppAccess::Act => return Some(Answer::Allow),
+            AppAccess::Ask => {}
+        }
+    }
+    if let Some(action) = request.input["command"].as_str().and_then(git::classify) {
+        let (rule, what) = match action {
+            GitAction::Commit => (settings.agent_commit, "Committing"),
+            GitAction::Publish => (settings.agent_push, "Pushing and publishing to GitHub"),
+        };
+        if rule == GitRule::Never {
+            return Some(Answer::Deny(format!(
+                "{what} is turned off for agents in Mission Control's Boundaries. Leave it to the user."
+            )));
+        }
+        let branch = GitRepo::open(workdir).ok().and_then(|repo| repo.current_branch());
+        if branch.is_some_and(|b| settings.protected_branches.contains(&b)) {
+            return None;
+        }
+        if rule == GitRule::Allow {
+            return Some(Answer::Allow);
+        }
+    }
+    if settings.full_autonomy || settings.auto_approves(&request.detail) {
+        Some(Answer::Allow)
+    } else {
+        None
+    }
+}
+
+fn send(run: &mut Run, request: &ApprovalRequest, answer: &Answer) {
+    let line = run.agent.reply(request, answer);
+    write_line(run, &line);
+}
+
+/// Hands a waiting run its goal.
+fn release_goal(run: &mut Run) {
+    let Some(goal) = run.waiting_goal.take() else { return };
+    write_line(run, &goal);
+    if run.summary.status == RunStatus::Starting {
+        run.summary.status = RunStatus::Running;
+    }
+}
+
+fn write_line(run: &mut Run, line: &str) {
+    let Some(stdin) = &mut run.stdin else { return };
+    if let Err(err) = writeln!(stdin, "{line}").and_then(|_| stdin.flush()) {
+        eprintln!("mission-control: could not write to run {}: {err}", run.summary.id);
+    }
+}
+
+/// Starts the agent with Mission Control on its stdin and stdout, and stderr going to the log.
+fn spawn_hosted(mut cmd: Command, log: &File) -> std::io::Result<Child> {
+    cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(log.try_clone()?);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // Without this every run flashes a console window.
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd.spawn()
+}
+
+/// Copies the agent's stdout to the log and forwards anything the orchestrator must act on.
+fn spawn_reader(
+    run_id: String,
+    agent: Arc<dyn Agent>,
+    stdout: ChildStdout,
+    mut log: File,
+    outbox: Sender<(String, HostMessage)>,
+) {
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            let _ = writeln!(log, "{line}");
+            if let Some(message) = agent.parse(&line) {
+                if outbox.send((run_id.clone(), message)).is_err() {
+                    return;
+                }
+            }
+        }
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::router::{TaskKind, Tier};
+    use std::time::{Duration, Instant};
+
+    /// Stands in for a real CLI with `rustc`, which is always present where tests run.
+    struct FakeAgent {
+        args: Vec<String>,
+        /// Acts like an agent that must connect to apps before taking its goal.
+        connects_first: bool,
+    }
+
+    impl Agent for FakeAgent {
+        fn kind(&self) -> AgentKind {
+            AgentKind::Claude
+        }
+        fn handles(&self, _task: TaskKind) -> bool {
+            true
+        }
+        fn model(&self, _tier: Tier) -> &'static str {
+            "fake"
+        }
+        fn command(&self, launch: &Launch) -> Command {
+            let mut cmd = Command::new("rustc");
+            cmd.current_dir(launch.workdir).args(&self.args);
+            cmd
+        }
+        fn readiness_probe(&self) -> Option<String> {
+            self.connects_first.then(|| "// are you ready?".into())
+        }
+        fn goal_message(&self, _goal: &str, _attachments: &[PathBuf]) -> String {
+            "fn main() {}".into()
+        }
+        fn parse(&self, _line: &str) -> Option<HostMessage> {
+            None
+        }
+        /// A comment, so the fake's "program" still compiles after being answered.
+        fn reply(&self, request: &ApprovalRequest, answer: &Answer) -> String {
+            format!("// {} {answer:?}", request.request_id)
+        }
+    }
+
+    /// Reads a program from stdin, so it stays alive until its stdin closes.
+    const WAITS_FOR_STDIN: &[&str] = &["-", "--emit=metadata", "--crate-name", "mc_fake"];
+
+    fn orchestrator(args: &[&str]) -> (Orchestrator, PathBuf) {
+        orchestrator_with(args, false)
+    }
+
+    fn orchestrator_with(args: &[&str], connects_first: bool) -> (Orchestrator, PathBuf) {
+        let root = std::env::temp_dir().join(format!("mc-test-{}", uuid::Uuid::new_v4()));
+        // Doubles as a project folder for code goals.
+        fs::create_dir_all(&root).unwrap();
+        let config = RuntimeConfig {
+            runs_dir: root.join("runs"),
+            scratch_dir: root.join("scratch"),
+            settings_path: root.join("settings.json"),
+        };
+        let agent = FakeAgent { args: args.iter().map(|a| a.to_string()).collect(), connects_first };
+        (Orchestrator::new(config, vec![Arc::new(agent)]), root)
+    }
+
+    fn wait_for_exit(orch: &mut Orchestrator) -> RunSummary {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            orch.poll();
+            let run = orch.runs().remove(0);
+            let ended = !matches!(run.status, RunStatus::Running | RunStatus::NeedsApproval);
+            if ended || Instant::now() > deadline {
+                return run;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    fn ask(orch: &Orchestrator, run_id: &str, request_id: &str) {
+        let request = ApprovalRequest {
+            request_id: request_id.into(),
+            tool: "Bash".into(),
+            label: "Bash".into(),
+            detail: "npm install".into(),
+            description: None,
+            input: serde_json::Value::Null,
+        };
+        orch.outbox.send((run_id.into(), HostMessage::Approval(request))).unwrap();
+    }
+
+    #[test]
+    fn a_run_is_tracked_until_it_exits() {
+        let (mut orch, root) = orchestrator(&["--version"]);
+        let run = orch.start("Add a logout button", None, &[]).unwrap();
+        assert_eq!(run.status, RunStatus::Running);
+        assert_eq!(run.workdir, root.join("scratch").display().to_string());
+
+        let done = wait_for_exit(&mut orch);
+        assert_eq!(done.status, RunStatus::Finished);
+        assert!(fs::read_to_string(&done.log_path).unwrap().contains("rustc"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_failing_agent_marks_the_run_failed() {
+        let (mut orch, root) = orchestrator(&["--no-such-flag"]);
+        orch.start("Add a logout button", None, &[]).unwrap();
+        assert_eq!(wait_for_exit(&mut orch).status, RunStatus::Failed);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn requests_wait_for_an_answer_and_finishing_lets_the_agent_exit() {
+        let (mut orch, root) = orchestrator(WAITS_FOR_STDIN);
+        let run = orch.start("Add a logout button", None, &[]).unwrap();
+
+        ask(&orch, &run.id, "r1");
+        orch.poll();
+        assert_eq!(orch.runs()[0].status, RunStatus::NeedsApproval);
+        assert_eq!(orch.approvals().len(), 1);
+
+        assert!(orch.answer(&run.id, "r1", Answer::Allow));
+        assert!(!orch.answer(&run.id, "r1", Answer::Allow), "an answered request is no longer pending");
+        assert_eq!(orch.runs()[0].status, RunStatus::Running);
+        assert!(orch.approvals().is_empty());
+
+        // Still waiting on stdin, so still running, until the agent reports it is done.
+        orch.poll();
+        assert_eq!(orch.runs()[0].status, RunStatus::Running);
+        orch.outbox.send((run.id.clone(), HostMessage::Finished(Some("done".into())))).unwrap();
+        let done = wait_for_exit(&mut orch);
+        assert_eq!((done.status, done.result.as_deref()), (RunStatus::Finished, Some("done")));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn read_only_runs_are_refused_without_asking() {
+        let (mut orch, root) = orchestrator(WAITS_FOR_STDIN);
+        let run = orch.start("What is in this folder?", Some(&root), &[]).unwrap();
+        assert_eq!(run.decision.access, Access::ReadOnly);
+        ask(&orch, &run.id, "r1");
+        orch.poll();
+        assert!(orch.approvals().is_empty());
+        assert_eq!(orch.runs()[0].status, RunStatus::Running);
+        assert!(orch.cancel(&run.id));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn browser_control_starts_only_once_the_user_allows_it() {
+        let (mut orch, root) = orchestrator(WAITS_FOR_STDIN);
+        let goal = "Open YouTube and play lofi";
+
+        let preview = orch.preview(goal, None, &[]).unwrap();
+        assert_eq!((preview.capability, preview.capability_granted), (Some(Capability::BrowserControl), None));
+        assert!(matches!(orch.start(goal, None, &[]), Err(StartError::NeedsPermission(Capability::BrowserControl))));
+
+        set(&mut orch, |s| {
+            s.capabilities.insert(Capability::BrowserControl, false);
+        });
+        assert!(matches!(orch.start(goal, None, &[]), Err(StartError::NotAllowed(Capability::BrowserControl))));
+
+        set(&mut orch, |s| {
+            s.capabilities.insert(Capability::BrowserControl, true);
+        });
+        assert_eq!(orch.preview(goal, None, &[]).unwrap().capability_granted, Some(true));
+        let run = orch.start(goal, None, &[]).unwrap();
+        assert_eq!(run.decision.task, TaskKind::Browse);
+        assert!(orch.preview("Add a button", None, &[]).unwrap().capability.is_none(), "code work needs no extra permission");
+        orch.cancel(&run.id);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn only_files_inside_handed_over_folders_can_be_recycled() {
+        let root = std::env::temp_dir().join(format!("mc-recycle-{}", uuid::Uuid::new_v4()));
+        let downloads = root.join("Downloads");
+        fs::create_dir_all(downloads.join("sub")).unwrap();
+        fs::write(downloads.join("a.iso"), vec![0u8; 10]).unwrap();
+        fs::write(downloads.join("sub").join("b.msi"), vec![0u8; 5]).unwrap();
+        fs::write(root.join("elsewhere.txt"), b"keep").unwrap();
+        let roots = [downloads.clone()];
+
+        assert_eq!(check_recyclable(&roots, &[downloads.join("a.iso"), downloads.join("sub").join("b.msi")]), Ok(15));
+        assert!(matches!(check_recyclable(&roots, &[root.join("elsewhere.txt")]), Err(RecycleError::Outside(_))));
+        assert!(
+            matches!(check_recyclable(&roots, &[downloads.join("..").join("elsewhere.txt")]), Err(RecycleError::Outside(_))),
+            "no climbing out with .."
+        );
+        assert!(matches!(check_recyclable(&roots, &[downloads.join("sub")]), Err(RecycleError::Outside(_))), "files only");
+        assert!(matches!(check_recyclable(&roots, &[downloads.join("gone.iso")]), Err(RecycleError::Outside(_))));
+        assert_eq!(check_recyclable(&roots, &[]), Err(RecycleError::Empty));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn recycling_waits_for_the_users_permission() {
+        let (mut orch, root) = orchestrator(&["--version"]);
+        let file = root.join("x.iso");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(&file, b"x").unwrap();
+        assert_eq!(orch.recycle("nope", &[file.clone()]), Err(RecycleError::NeedsPermission));
+        set(&mut orch, |s| {
+            s.capabilities.insert(Capability::RecycleFiles, false);
+        });
+        assert_eq!(orch.recycle("nope", &[file.clone()]), Err(RecycleError::NotAllowed));
+        set(&mut orch, |s| {
+            s.capabilities.insert(Capability::RecycleFiles, true);
+        });
+        assert_eq!(orch.recycle("nope", &[file.clone()]), Err(RecycleError::UnknownRun));
+        assert!(file.exists(), "nothing was moved");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn goals_no_agent_can_do_are_refused() {
+        let (mut orch, root) = orchestrator(&["--version"]);
+        set(&mut orch, |s| s.claude_enabled = false);
+        assert!(matches!(orch.start("Add a button", Some(&root), &[]), Err(StartError::NoAgent(_))));
+        assert!(matches!(orch.start("  ", None, &[]), Err(StartError::EmptyGoal)));
+        assert!(orch.runs().is_empty());
+    }
+
+    #[test]
+    fn code_work_waits_for_a_project() {
+        let (mut orch, root) = orchestrator(&["--version"]);
+        assert!(matches!(orch.start("Fix the bug in the login", None, &[]), Err(StartError::NeedsProject)));
+        assert!(matches!(orch.preview("Fix the bug in the login", None, &[]), Err(StartError::NeedsProject)));
+        assert_eq!(orch.preview("play jcole", None, &[]).unwrap().decision.task, TaskKind::Browse);
+        assert!(orch.runs().is_empty());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    fn set(orch: &mut Orchestrator, change: impl FnOnce(&mut Settings)) {
+        let mut settings = orch.settings().clone();
+        change(&mut settings);
+        orch.update_settings(settings).unwrap();
+    }
+
+    #[test]
+    fn command_centre_rules_answer_requests_without_asking() {
+        let (mut orch, root) = orchestrator(WAITS_FOR_STDIN);
+        let run = orch.start("Add a logout button", None, &[]).unwrap();
+
+        set(&mut orch, |s| s.auto_approve = vec!["npm install".into()]);
+        ask(&orch, &run.id, "listed");
+        orch.poll();
+        assert!(orch.approvals().is_empty());
+
+        set(&mut orch, |s| s.auto_approve.clear());
+        ask(&orch, &run.id, "unlisted");
+        orch.poll();
+        assert_eq!(orch.approvals().len(), 1);
+
+        set(&mut orch, |s| s.full_autonomy = true);
+        ask(&orch, &run.id, "autonomous");
+        orch.poll();
+        assert_eq!(orch.approvals().len(), 1, "only the request asked before autonomy was on is waiting");
+        assert_eq!(orch.runs()[0].auto_allowed, 2);
+
+        orch.cancel(&run.id);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn read_only_beats_full_autonomy() {
+        let (mut orch, root) = orchestrator(WAITS_FOR_STDIN);
+        set(&mut orch, |s| {
+            s.full_autonomy = true;
+            s.read_only_mode = true;
+        });
+        let run = orch.start("Add a logout button", None, &[]).unwrap();
+        assert_eq!(run.decision.access, Access::ReadOnly);
+        assert!(run.decision.reason.contains("read-only mode"));
+
+        ask(&orch, &run.id, "r1");
+        orch.poll();
+        assert_eq!((orch.runs()[0].auto_allowed, orch.runs()[0].auto_denied), (0, 1));
+        orch.cancel(&run.id);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn command_centre_limits_where_and_how_runs_start() {
+        let (mut orch, root) = orchestrator(&["--version"]);
+
+        set(&mut orch, |s| s.max_tier = Tier::Fast);
+        let run = orch.start("Refactor the auth module", Some(&root), &[]).unwrap();
+        assert_eq!(run.decision.tier, Tier::Fast);
+        assert!(run.decision.reason.contains("Capped"));
+
+        set(&mut orch, |s| s.allowed_folders = vec![root.join("scratch")]);
+        let elsewhere = std::env::temp_dir();
+        assert!(matches!(orch.start("Add a button", Some(&elsewhere), &[]), Err(StartError::FolderNotAllowed(_))));
+        assert!(orch.start("Plan my week", None, &[]).is_ok(), "the scratch folder is always allowed");
+
+        set(&mut orch, |s| s.claude_enabled = false);
+        assert!(matches!(orch.start("Add a button", Some(&root.join("scratch")), &[]), Err(StartError::NoAgent(_))));
+
+        let saved = Settings::load(&root.join("settings.json"));
+        assert!(!saved.claude_enabled && saved.max_tier == Tier::Fast);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    fn ask_command(orch: &Orchestrator, run_id: &str, request_id: &str, command: &str) {
+        let request = ApprovalRequest {
+            request_id: request_id.into(),
+            tool: "Bash".into(),
+            label: "Bash".into(),
+            detail: command.into(),
+            description: None,
+            input: serde_json::json!({ "command": command }),
+        };
+        orch.outbox.send((run_id.into(), HostMessage::Approval(request))).unwrap();
+    }
+
+    #[test]
+    fn each_app_keeps_to_the_access_the_user_gave_it() {
+        let create = ApprovalRequest {
+            request_id: "r".into(),
+            tool: "mcp__claude_ai_Notion__notion-create-pages".into(),
+            label: "Notion · create pages".into(),
+            detail: "Week 3 notes".into(),
+            description: None,
+            input: serde_json::json!({}),
+        };
+        let here = Path::new(".");
+        let with = |access: AppAccess, full_autonomy: bool| {
+            let mut settings = Settings { full_autonomy, ..Settings::default() };
+            settings.app_access.insert("claude_ai_Notion".into(), access);
+            auto_answer(&settings, Access::UseApps, &create, here)
+        };
+
+        assert_eq!(with(AppAccess::Ask, false), None, "ask is the default and comes to the user");
+        assert_eq!(with(AppAccess::Act, false), Some(Answer::Allow));
+        assert!(matches!(with(AppAccess::Read, false), Some(Answer::Deny(_))));
+        assert!(matches!(with(AppAccess::Read, true), Some(Answer::Deny(_))), "read-only outranks full autonomy");
+        assert!(
+            matches!(auto_answer(&Settings::default(), Access::ReadOnly, &create, here), Some(Answer::Deny(_))),
+            "a read-only run refuses even in an app set to act"
+        );
+    }
+
+    #[test]
+    fn git_rules_outrank_autonomy_and_protect_branches() {
+        let (mut orch, root) = orchestrator(WAITS_FOR_STDIN);
+        let repo = root.join("repo");
+        GitRepo::init(&repo).unwrap();
+        let switch = |branch: &str| {
+            Command::new("git").current_dir(&repo).args(["checkout", "-q", "-b", branch]).output().unwrap();
+        };
+        switch("main");
+        let run = orch.start("Add a logout button", Some(&repo), &[]).unwrap();
+        let pending = |orch: &Orchestrator| orch.approvals().into_iter().map(|a| a.request.request_id).collect::<Vec<_>>();
+
+        set(&mut orch, |s| {
+            s.full_autonomy = true;
+            s.agent_push = GitRule::Never;
+        });
+        ask_command(&orch, &run.id, "push", "git add . && git push");
+        ask_command(&orch, &run.id, "commit on main", "git commit -m wip");
+        ask_command(&orch, &run.id, "tests", "npm test");
+        orch.poll();
+        assert_eq!(orch.runs()[0].auto_denied, 1, "never beats full autonomy");
+        assert_eq!(pending(&orch), ["commit on main"], "a protected branch always asks");
+        assert_eq!(orch.runs()[0].auto_allowed, 1, "other commands follow full autonomy");
+
+        switch("feature");
+        set(&mut orch, |s| {
+            s.full_autonomy = false;
+            s.agent_commit = GitRule::Allow;
+        });
+        ask_command(&orch, &run.id, "commit on feature", "git commit -m wip");
+        ask_command(&orch, &run.id, "push on feature", "git push");
+        orch.poll();
+        assert_eq!(orch.runs()[0].auto_allowed, 2);
+        assert_eq!(orch.runs()[0].auto_denied, 2);
+        assert_eq!(pending(&orch), ["commit on main"]);
+
+        orch.cancel(&run.id);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_run_that_connects_to_apps_gets_its_goal_once_they_are_ready() {
+        let (mut orch, root) = orchestrator_with(WAITS_FOR_STDIN, true);
+        let run = orch.start("Add a logout button", None, &[]).unwrap();
+        assert_eq!(run.status, RunStatus::Starting);
+
+        orch.outbox.send((run.id.clone(), HostMessage::Ready(vec![AppConnection { name: "Notion".into(), status: "pending".into() }]))).unwrap();
+        orch.poll();
+        assert_eq!(orch.runs()[0].status, RunStatus::Starting, "still connecting");
+
+        orch.outbox.send((run.id.clone(), HostMessage::Ready(vec![AppConnection { name: "Notion".into(), status: "connected".into() }]))).unwrap();
+        orch.poll();
+        assert_eq!(orch.runs()[0].status, RunStatus::Running);
+
+        // The fake compiles what it was sent, so it only succeeds if the goal arrived.
+        orch.outbox.send((run.id.clone(), HostMessage::Finished(Some("done".into())))).unwrap();
+        let done = wait_for_exit(&mut orch);
+        assert_eq!((done.status, done.result.as_deref()), (RunStatus::Finished, Some("done")));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn attachments_must_exist_and_the_assistant_can_be_switched_off() {
+        let (mut orch, root) = orchestrator(&["--version"]);
+        let missing = root.join("nope.pdf");
+        assert!(matches!(orch.start("Summarise this", None, &[missing]), Err(StartError::MissingAttachment(_))));
+
+        set(&mut orch, |s| s.assistant_enabled = false);
+        assert!(matches!(orch.start("Create a Notion page", None, &[]), Err(StartError::NoAgent(_))));
+        let _ = fs::remove_dir_all(root);
+    }
+}

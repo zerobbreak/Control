@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { SessionStatus, SessionSummary } from "../types";
-import { leadState, pillCrew, roleOf, sessionState } from "./pillState";
+import { leadState, pillCrew, progressSteps, roleOf, sessionState } from "./pillState";
 
 function session(id: string, status: SessionStatus, currentActivity: string | null = null): SessionSummary {
   return {
@@ -74,5 +74,24 @@ describe("roleOf", () => {
   it("treats Claude Code and Gemini CLI as coding agents", () => {
     expect(roleOf("claude")).toBe("code");
     expect(roleOf("gemini")).toBe("code");
+  });
+});
+
+describe("progressSteps", () => {
+  const statuses = (state: Parameters<typeof progressSteps>[0]) => progressSteps(state).map((s) => s.status);
+
+  it("walks Thinking → Working → Done", () => {
+    expect(statuses("idle")).toEqual(["upcoming", "upcoming", "upcoming"]);
+    expect(statuses("thinking")).toEqual(["current", "upcoming", "upcoming"]);
+    expect(statuses("working")).toEqual(["done", "current", "upcoming"]);
+    expect(statuses("done")).toEqual(["done", "done", "done"]);
+  });
+
+  it("blocks the Working step when the agent needs you", () => {
+    expect(progressSteps("needs")).toEqual([
+      { label: "Thinking", status: "done" },
+      { label: "Needs you", status: "blocked" },
+      { label: "Done", status: "upcoming" },
+    ]);
   });
 });

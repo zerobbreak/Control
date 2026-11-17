@@ -2,12 +2,12 @@
 // calls `blobFrame` once per animation frame and copies the result onto its SVG.
 
 /** The roles an agent can play. Each role has its own blob shape and colour. */
-export type AvatarRole = "mc" | "code" | "web" | "desk";
+export type AvatarRole = "mc" | "code" | "web" | "desk" | "assist";
 
 /** What an avatar is showing, from calmest to most urgent. */
 export type AvatarState = "idle" | "thinking" | "working" | "needs" | "done";
 
-export type ShapeId = "orb" | "squircle" | "flower" | "capsule";
+export type ShapeId = "orb" | "squircle" | "flower" | "capsule" | "clover";
 
 /** Radius of the shape at angle `t`, in SVG coordinates (sin(t) = -1 is the top). */
 type RadiusFn = (t: number) => number;
@@ -22,6 +22,8 @@ export const SHAPES: Record<ShapeId, RadiusFn> = {
   squircle: superellipse(1, 1, 4.2),
   flower: (t) => 0.9 + 0.11 * Math.cos(5 * t + Math.PI / 2),
   capsule: superellipse(1.3, 0.78, 3.2),
+  // Three soft lobes, one on top: the assistant, distinct from the five-petal browser.
+  clover: (t) => 0.9 + 0.1 * Math.cos(3 * t + Math.PI / 2),
 };
 
 /** The blob family: you can tell agents apart by outline alone, without relying on colour. */
@@ -30,6 +32,7 @@ export const ROLE_SHAPE: Record<AvatarRole, ShapeId> = {
   code: "squircle",
   web: "flower",
   desk: "capsule",
+  assist: "clover",
 };
 
 export const ROLE_COLOR: Record<AvatarRole, string> = {
@@ -37,6 +40,7 @@ export const ROLE_COLOR: Record<AvatarRole, string> = {
   code: "#60a5fa",
   web: "#2dd4bf",
   desk: "#f472b6",
+  assist: "#c084fc",
 };
 
 type Motion = { amp: number; speed: number; spin: number; hop: boolean; dim: boolean };
@@ -112,8 +116,15 @@ const BLINK_EVERY = 4.6;
 const BLINK_FOR = 0.12;
 const HOP_HEIGHT = 0.28;
 
-/** Everything needed to draw one blob at time `tau` seconds. */
-export function blobFrame(shape: ShapeId, state: AvatarState, tau: number, seed: number): BlobFrame {
+/** Where a blob is looking, from -1 to 1 on each axis; {0, 0} is straight ahead. */
+export type Gaze = { x: number; y: number };
+
+const AHEAD: Gaze = { x: 0, y: 0 };
+const GAZE_X = 0.14;
+const GAZE_Y = 0.1;
+
+/** Everything needed to draw one blob at time `tau` seconds, looking towards `gaze`. */
+export function blobFrame(shape: ShapeId, state: AvatarState, tau: number, seed: number, gaze: Gaze = AHEAD): BlobFrame {
   const m = MOTION[state];
 
   // "Needs you" hops: lift off for the first 30% of each beat, squash on landing.
@@ -131,12 +142,13 @@ export function blobFrame(shape: ShapeId, state: AvatarState, tau: number, seed:
 
   // Eyes ride along with the body and glance up and around while thinking.
   const thinking = state === "thinking";
-  const eyeY = dy - 0.06 + (thinking ? -0.14 + Math.sin(tau * 1.3) * 0.03 : 0);
+  const eyeY = dy - 0.06 + (thinking ? -0.14 + Math.sin(tau * 1.3) * 0.03 : 0) + clamp(gaze.y) * GAZE_Y;
+  const lookX = clamp(gaze.x) * GAZE_X;
   if (state === "done") {
-    const arc = (x: number) => `M${fmt(x - 0.13)} ${fmt(eyeY + 0.05)} q0.13 -0.2 0.26 0`;
+    const arc = (x: number) => `M${fmt(x + lookX - 0.13)} ${fmt(eyeY + 0.05)} q0.13 -0.2 0.26 0`;
     return { body, ring, dim: m.dim, eyes: { kind: "happy", left: arc(-EYE_X), right: arc(EYE_X) } };
   }
-  const shiftX = thinking ? Math.sin(tau * 0.9 + seed) * 0.05 : 0;
+  const shiftX = (thinking ? Math.sin(tau * 0.9 + seed) * 0.05 : 0) + lookX;
   const open = mod(tau + seed, BLINK_EVERY) < BLINK_FOR ? 0.12 : 1;
   const size = state === "needs" ? 1.25 : 1;
   const eye = (x: number): Ellipse => ({ cx: x + shiftX, cy: eyeY, rx: 0.1 * size, ry: 0.16 * size * open });
@@ -148,6 +160,21 @@ export function mixHex(from: string, to: string, amount: number): string {
   const channel = (hex: string, i: number) => parseInt(hex.slice(1 + i * 2, 3 + i * 2), 16);
   const out = [0, 1, 2].map((i) => Math.round(channel(from, i) + (channel(to, i) - channel(from, i)) * amount));
   return "#" + out.map((c) => c.toString(16).padStart(2, "0")).join("");
+}
+
+/**
+ * Which way to look at a point `dx`, `dy` CSS pixels from a blob's centre. Eyes turn fully once the
+ * point is `reach` pixels away, and ease towards straight ahead as it comes close.
+ */
+export function gazeTowards(dx: number, dy: number, reach: number): Gaze {
+  const distance = Math.hypot(dx, dy);
+  if (distance === 0) return AHEAD;
+  const strength = Math.min(1, distance / reach);
+  return { x: (dx / distance) * strength, y: (dy / distance) * strength };
+}
+
+function clamp(v: number) {
+  return Math.max(-1, Math.min(1, v));
 }
 
 function mod(a: number, n: number) {
